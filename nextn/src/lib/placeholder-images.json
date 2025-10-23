@@ -1,0 +1,40 @@
+{
+  "placeholderImages": [
+    {
+      "id": "dress-1",
+      "description": "A minimalist white linen dress.",
+      "imageUrl": "https://images.unsplash.com/photo-1530203139227-6eb21d04550b?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&ixid=M3w3NDE5ODJ8MHwxfHNlYXJjaHwxMHx8d2hpdGUlMjBkcmVzc3xlbnwwfHx8fDE3NjExNjgxNTB8MA&ixlib=rb-4.1.0&q=80&w=1080",
+      "imageHint": "white dress"
+    },
+    {
+      "id": "dress-2",
+      "description": "An elegant black evening gown.",
+      "imageUrl": "https://images.unsplash.com/photo-1624968732046-64d35702ed2e?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&ixid=M3w3NDE5ODJ8MHwxfHNlYXJjaHw4fHxibGFjayUyMGRyZXNzfGVufDB8fHx8MTc2MTEzNjQzN3ww&ixlib=rb-4.1.0&q=80&w=1080",
+      "imageHint": "black dress"
+    },
+    {
+      "id": "dress-3",
+      "description": "A soft nude-colored silk slip dress.",
+      "imageUrl": "https://images.unsplash.com/photo-1646932520067-81bdc09af07a?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&ixid=M3w3NDE5ODJ8MHwxfHNlYXJjaHw1fHxudWRlJTIwZHJlc3N8ZW58MHx8fHwxNzYxMTY4MTUwfDA&ixlib=rb-4.1.0&q=80&w=1080",
+      "imageHint": "nude dress"
+    },
+    {
+      "id": "dress-4",
+      "description": "A casual floral print summer dress.",
+      "imageUrl": "https://images.unsplash.com/photo-1550596015-ac51583a9e5c?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&ixid=M3w3NDE5ODJ8MHwxfHNlYXJjaHwxMHx8ZmxvcmFsJTIwZHJlc3N8ZW58MHx8fHwxNzYxMTEwOTMzfDA&ixlib=rb-4.1.0&q=80&w=1080",
+      "imageHint": "floral dress"
+    },
+    {
+      "id": "dress-5",
+      "description": "A minimalist gray midi dress.",
+      "imageUrl": "https://images.unsplash.com/photo-1748587802013-7a8f4284a078?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&ixid=M3w3NDE5ODJ8MHwxfHNlYXJjaHwxMHx8Z3JheSUyMGRyZXNzfGVufDB8fHx8MTc2MTE2ODE1MHww&ixlib=rb-4.1.0&q=80&w=1080",
+      "imageHint": "gray dress"
+    },
+    {
+      "id": "dress-6",
+      "description": "A chic golden satin party dress.",
+      "imageUrl": "https://images.unsplash.com/photo-1664322046189-196a30a7f5e6?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&ixid=M3w3NDE5ODJ8MHwxfHNlYXJjaHw2fHxnb2xkZW4lMjBkcmVzc3xlbnwwfHx8fDE3NjExNjgxNTB8MA&ixlib=rb-4.1.0&q=80&w=1080",
+      "imageHint": "golden dress"
+    }
+  ]
+}
