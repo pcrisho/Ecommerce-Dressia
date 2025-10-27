@@ -24,7 +24,11 @@ export function ProductCard({ dress }: { dress: Dress }) {
         </div>
       </CardContent>
       <CardFooter className="p-4 pt-0 bg-card">
-        <Button variant="default" className="w-full rounded-md bg-amber-100">
+        {/* Light mode: pale yellow button. Dark mode: darker amber + readable text for contrast */}
+        <Button
+          variant="default"
+          className="w-full rounded-md bg-amber-100 text-foreground dark:bg-amber-700 dark:text-white"
+        >
           Ver Detalle
         </Button>
       </CardFooter>
