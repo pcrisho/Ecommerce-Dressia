@@ -9,19 +9,19 @@ const DATA_FILE = path.join(process.cwd(), 'data', 'training_phashes.json');
 const VECTOR_BITS = 64; // aHash 8x8
 const DEFAULT_THRESHOLD = 12; // Hamming distance threshold
 
-function hexToBigInt(hex: string): bigint {
-  return BigInt('0x' + hex);
+// Convert hex (16 chars -> 64 bits) to a binary string of length 64
+function hexToBin64(hex: string): string {
+  // normalize
+  const h = hex.replace(/^0x/, '').padStart(16, '0').toLowerCase();
+  return h.split('').map((c) => parseInt(c, 16).toString(2).padStart(4, '0')).join('');
 }
 
 function hammingDistanceHex(aHex: string, bHex: string): number {
-  const a = hexToBigInt(aHex);
-  const b = hexToBigInt(bHex);
-  let x = a ^ b;
+  const aBin = hexToBin64(aHex);
+  const bBin = hexToBin64(bHex);
   let count = 0;
-  const ONE = BigInt(1);
-  while (x) {
-    count += Number(x & ONE);
-    x = x >> ONE;
+  for (let i = 0; i < aBin.length && i < bBin.length; i++) {
+    if (aBin[i] !== bBin[i]) count++;
   }
   return count;
 }
@@ -67,17 +67,27 @@ export async function POST(req: NextRequest) {
 
     // Compare against dataset
     const threshold = Number(req.nextUrl.searchParams.get('threshold') ?? DEFAULT_THRESHOLD);
-    const results = phashes
-      .map((entry) => {
-        const dist = hammingDistanceHex(queryPhash, entry.phash);
-        return { ...entry, distance: dist };
-      })
-      .filter((r) => r.distance <= threshold)
-      .sort((a, b) => a.distance - b.distance)
-      .slice(0, 10);
+    // Compute distances for all entries
+    const scored = phashes.map((entry) => ({ ...entry, distance: hammingDistanceHex(queryPhash, entry.phash) }));
+
+    // Filter by threshold
+    const filtered = scored.filter((s) => s.distance <= threshold);
+
+    // Deduplicate by product key (prefer productId; fallback to filename base)
+    const byProduct = new Map<string, { filename: string; phash: string; productId: string | null; distance: number }>();
+    for (const e of filtered) {
+      const key = e.productId ?? e.filename.replace(/\..+$/, '');
+      const existing = byProduct.get(key);
+      if (!existing || e.distance < existing.distance) {
+        byProduct.set(key, { filename: e.filename, phash: e.phash, productId: e.productId, distance: e.distance });
+      }
+    }
+
+    // Convert to array and sort by distance, limit to 10 unique products
+    const unique = Array.from(byProduct.values()).sort((a, b) => a.distance - b.distance).slice(0, 10);
 
     // Map to products when possible
-    const mapped = results.map((r) => {
+    const mapped = unique.map((r) => {
       const id = r.productId ?? r.filename.replace(/\..+$/, '');
       const product = allDresses.find((d) => String(d.id) === String(id));
       return {
