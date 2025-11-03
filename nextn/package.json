@@ -2,12 +2,6 @@
   "name": "nextn",
   "version": "0.1.0",
   "private": true,
-  "scripts": {
-    "dev": "next dev",
-    "build": "next build",
-    "start": "next start",
-    "lint": "eslint"
-  },
   "dependencies": {
     "react": "19.2.0",
     "react-dom": "19.2.0",
@@ -51,6 +45,15 @@
     "tailwind-merge": "^3.0.1",
     "tailwindcss-animate": "^1.0.7",
     "zod": "^3.24.2"
+    ,
+    "sharp": "^0.32.1"
+  },
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint",
+    "generate:phashes": "node ./scripts/generate_phashes.js"
   },
   "devDependencies": {
     "babel-plugin-react-compiler": "1.0.0",
