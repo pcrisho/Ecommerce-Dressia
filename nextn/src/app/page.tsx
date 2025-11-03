@@ -41,24 +41,51 @@ export default function Home() {
     setAiMessage(null);
     setImageSearchResults([]);
 
+    // Show preview
     const reader = new FileReader();
     reader.readAsDataURL(file);
     reader.onloadend = async () => {
       const base64Data = reader.result as string;
       setImagePreview(base64Data);
 
-      const searchPromise = simulateImageSearch({ photoDataUri: base64Data });
-      const delayPromise = new Promise((resolve) => setTimeout(resolve, 2000));
+      try {
+        // Upload file using FormData to the visual-match API route
+        const fd = new FormData();
+        fd.append('file', file);
 
-      const [searchResult] = await Promise.all([searchPromise, delayPromise]);
+        const resp = await fetch('/api/search/visual-match', {
+          method: 'POST',
+          body: fd,
+        });
 
-      const randomDresses: Dress[] = [...allDresses]
-        .sort(() => 0.5 - Math.random())
-        .slice(0, 3);
-      
-      setAiMessage(searchResult.message);
-      setImageSearchResults(randomDresses);
-      setIsLoadingImage(false);
+        if (!resp.ok) {
+          const text = await resp.text();
+          setAiMessage('Error en búsqueda por imagen');
+          console.error('visual-match error', resp.status, text);
+          setIsLoadingImage(false);
+          return;
+        }
+
+        const json = await resp.json();
+
+        const results = json.results ?? [];
+        const products: Dress[] = results
+          .map((r: any) => r.product)
+          .filter(Boolean);
+
+        if (products.length > 0) {
+          setAiMessage(`Se encontraron ${products.length} coincidencia(s)`);
+          setImageSearchResults(products);
+        } else {
+          setAiMessage('No se encontraron coincidencias.');
+          setImageSearchResults([]);
+        }
+      } catch (err) {
+        console.error('Error uploading image for visual match', err);
+        setAiMessage('Error procesando la imagen.');
+      } finally {
+        setIsLoadingImage(false);
+      }
     };
   };
 
