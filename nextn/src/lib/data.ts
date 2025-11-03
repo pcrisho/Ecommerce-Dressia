@@ -24,13 +24,13 @@ export const vestidos: Dress[] = [
   },
   {
     id: '4',
-    nombre: 'Vestido "Matchy"',
+    nombre: 'Blusa "Matchy"',
     precio: 95,
     image: dressImages.find(i => i.id === 'dress-4')!
   },
   {
     id: '5',
-    nombre: 'Vestido "Topp"',
+    nombre: 'Blusa "Topp"',
     precio: 135,
     image: dressImages.find(i => i.id === 'dress-5')!
   },
