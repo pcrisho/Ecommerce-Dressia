@@ -76,7 +76,9 @@ export async function POST(req: NextRequest) {
     // Deduplicate by product key (prefer productId; fallback to filename base)
     const byProduct = new Map<string, { filename: string; phash: string; productId: string | null; distance: number }>();
     for (const e of filtered) {
-      const key = e.productId ?? e.filename.replace(/\..+$/, '');
+  // Prefer productId when available; otherwise use folder name (first segment) so different
+  // variants stored in different folders are treated as separate products.
+  const key = e.productId ?? (e.filename.includes('/') ? e.filename.split('/')[0] : e.filename.replace(/\..+$/, ''));
       const existing = byProduct.get(key);
       if (!existing || e.distance < existing.distance) {
         byProduct.set(key, { filename: e.filename, phash: e.phash, productId: e.productId, distance: e.distance });

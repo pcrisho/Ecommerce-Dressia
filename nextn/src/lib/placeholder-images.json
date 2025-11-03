@@ -35,6 +35,12 @@
       "description": "A chic golden satin party dress.",
       "imageUrl": "/Bembella.jpeg",
       "imageHint": "golden dress"
+    },
+        {
+      "id": "dress-7",
+      "description": "A chic golden satin party dress.",
+      "imageUrl": "/Bembella-red.jpeg",
+      "imageHint": "golden dress"
     }
   ]
 }
