@@ -7,7 +7,7 @@ import { vestidos as allDresses } from '@/lib/data';
 
 const DATA_FILE = path.join(process.cwd(), 'data', 'training_phashes.json');
 const VECTOR_BITS = 64; // pHash 8x8 -> 64 bits
-const DEFAULT_THRESHOLD = 12; // default Hamming distance threshold (will be re-evaluated by analysis)
+const DEFAULT_THRESHOLD = 20; // more permissive by default (64-bit space)
 
 // Convert hex (16 chars -> 64 bits) to a binary string of length 64
 function hexToBin64(hex: string): string {
@@ -79,6 +79,18 @@ async function computePHashFromBuffer(buffer: Buffer): Promise<string> {
   return hex;
 }
 
+// Compute aHash (average hash) from buffer: resize to 8x8 grayscale, mean threshold
+async function computeAHashFromBuffer(buffer: Buffer): Promise<string> {
+  const SIZE = 8;
+  const raw = await sharp(buffer).resize(SIZE, SIZE, { fit: 'fill' }).grayscale().raw().toBuffer();
+  const vals: number[] = [];
+  for (let i = 0; i < SIZE * SIZE; i++) vals.push(raw[i]);
+  const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
+  const bits = vals.map((v) => (v > mean ? '1' : '0')).join('');
+  const hex = BigInt('0b' + bits).toString(16).padStart(16, '0');
+  return hex;
+}
+
 export async function POST(req: NextRequest) {
   try {
     // Load precomputed phashes
@@ -108,11 +120,21 @@ export async function POST(req: NextRequest) {
     }
 
     const queryPhash = await computePHashFromBuffer(fileBuffer!);
+    const queryAhash = await computeAHashFromBuffer(fileBuffer!);
 
     // Compare against dataset
     const threshold = Number(req.nextUrl.searchParams.get('threshold') ?? DEFAULT_THRESHOLD);
-    // Compute distances for all entries
-    const scored = phashes.map((entry) => ({ ...entry, distance: hammingDistanceHex(queryPhash, entry.phash) }));
+    // Combine pHash + aHash distances (weighted) to be more robust to variations
+    const weightP = 0.6; // give more weight to perceptual hash
+    const weightA = 1 - weightP;
+    const scored = phashes.map((entry) => {
+      const dp = hammingDistanceHex(queryPhash, entry.phash);
+      // entry may have ahash (from updated generate_phashes); if not, fallback to pHash
+      const entryA = (entry as any).ahash ?? entry.phash;
+      const da = hammingDistanceHex(queryAhash, entryA);
+      const combined = Math.round(dp * weightP + da * weightA);
+      return { ...entry, distance: combined, rawDistanceP: dp, rawDistanceA: da };
+    });
 
     // Filter by threshold
     const filtered = scored.filter((s) => s.distance <= threshold);

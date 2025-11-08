@@ -190,7 +190,14 @@ export default function Home() {
             {selectedDress && (
               <div className="fixed inset-0 z-50 flex items-center justify-center">
                 <div className="absolute inset-0 bg-black/40" onClick={() => setSelectedDress(null)} />
-                <div className="relative max-w-3xl w-full mx-4 bg-white dark:bg-gray-900 rounded-lg shadow-lg p-6 z-10">
+                <div
+                  className="relative max-w-3xl w-full mx-4 bg-white dark:bg-gray-900 rounded-lg shadow-lg p-6 z-10"
+                  style={{
+                    maxHeight: '90vh',
+                    overflowY: 'auto',
+                    height: '500px', // alto fijo para móviles, puedes ajustar
+                  }}
+                >
                   <div className="flex justify-between items-start gap-4">
                     <h3 className="text-2xl font-bold">Detalle del producto</h3>
                     <button

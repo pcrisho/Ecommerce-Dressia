@@ -68,6 +68,19 @@ async function computePHash(buffer) {
   return hex;
 }
 
+// Compute aHash (average hash) from buffer.
+// Algorithm: resize to 8x8 grayscale, compute mean and produce 64-bit hash based on values > mean.
+async function computeAHash(buffer) {
+  const SIZE = 8;
+  const raw = await sharp(buffer).resize(SIZE, SIZE, { fit: 'fill' }).grayscale().raw().toBuffer();
+  const vals = [];
+  for (let i = 0; i < SIZE * SIZE; i++) vals.push(raw[i]);
+  const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
+  const bits = vals.map((v) => (v > mean ? '1' : '0')).join('');
+  const hex = BigInt('0b' + bits).toString(16).padStart(16, '0');
+  return hex;
+}
+
 function readProductMapping() {
   // Try to read src/lib/data.ts and extract { id, nombre } pairs so we can map folder names -> product ids
   if (!fs.existsSync(DATA_TS)) return [];
@@ -112,7 +125,8 @@ function walkDir(dir) {
   for (const p of files) {
     try {
       const buf = fs.readFileSync(p);
-    const phash = await computePHash(buf);
+      const phash = await computePHash(buf);
+      const ahash = await computeAHash(buf);
       const rel = path.relative(TRAIN_DIR, p).replace(/\\/g, '/');
       const parts = rel.split('/');
       const folder = parts.length > 1 ? parts[0] : null;
@@ -125,8 +139,8 @@ function walkDir(dir) {
         if (found) productId = found.id;
       }
 
-      out.push({ filename: rel, phash, productId });
-      console.log('Processed', rel, '->', phash, 'productId=', productId);
+  out.push({ filename: rel, phash, ahash, productId });
+  console.log('Processed', rel, '->', phash, ahash, 'productId=', productId);
     } catch (err) {
       console.error('Failed to process', p, err);
     }
