@@ -4,7 +4,13 @@ import { Card, CardContent, CardFooter } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { formatPrice } from '@/lib/utils';
 
-export function ProductCard({ dress }: { dress: Dress }) {
+export function ProductCard({
+  dress,
+  onViewDetails,
+}: {
+  dress: Dress;
+  onViewDetails?: (dress: Dress) => void;
+}) {
   return (
     <Card className="overflow-hidden transition-all duration-300 hover:shadow-lg group border-none shadow-sm rounded-lg">
       <CardContent className="p-0">
@@ -28,6 +34,7 @@ export function ProductCard({ dress }: { dress: Dress }) {
         <Button
           variant="default"
           className="w-full rounded-md bg-amber-100 text-foreground dark:bg-amber-700 dark:text-white"
+          onClick={() => onViewDetails?.(dress)}
         >
           Ver Detalle
         </Button>

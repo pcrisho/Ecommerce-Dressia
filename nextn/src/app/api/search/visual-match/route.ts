@@ -6,8 +6,8 @@ import sharp from 'sharp';
 import { vestidos as allDresses } from '@/lib/data';
 
 const DATA_FILE = path.join(process.cwd(), 'data', 'training_phashes.json');
-const VECTOR_BITS = 64; // aHash 8x8
-const DEFAULT_THRESHOLD = 12; // Hamming distance threshold
+const VECTOR_BITS = 64; // pHash 8x8 -> 64 bits
+const DEFAULT_THRESHOLD = 12; // default Hamming distance threshold (will be re-evaluated by analysis)
 
 // Convert hex (16 chars -> 64 bits) to a binary string of length 64
 function hexToBin64(hex: string): string {
@@ -26,11 +26,55 @@ function hammingDistanceHex(aHex: string, bHex: string): number {
   return count;
 }
 
-async function computeAHashFromBuffer(buffer: Buffer): Promise<string> {
-  const raw = await sharp(buffer).resize(8, 8, { fit: 'fill' }).grayscale().raw().toBuffer();
-  const pixels = Array.from(raw);
-  const avg = pixels.reduce((s, v) => s + v, 0) / pixels.length;
-  const bits = pixels.map((v) => (v > avg ? '1' : '0')).join('');
+// Compute pHash from buffer: resize to 32x32 grayscale, DCT, keep top-left 8x8 block
+async function computePHashFromBuffer(buffer: Buffer): Promise<string> {
+  const SIZE = 32;
+  const SMALL = 8;
+  const raw = await sharp(buffer).resize(SIZE, SIZE, { fit: 'fill' }).grayscale().raw().toBuffer();
+  const pixels: number[][] = [];
+  for (let y = 0; y < SIZE; y++) {
+    const row: number[] = [];
+    for (let x = 0; x < SIZE; x++) {
+      row.push(raw[y * SIZE + x]);
+    }
+    pixels.push(row);
+  }
+
+  // naive 2D DCT
+  function dct2D(matrix: number[][]) {
+    const N = SIZE;
+    const out: number[][] = Array.from({ length: N }, () => new Array(N).fill(0));
+    const PI = Math.PI;
+    for (let u = 0; u < N; u++) {
+      for (let v = 0; v < N; v++) {
+        let sum = 0;
+        for (let i = 0; i < N; i++) {
+          for (let j = 0; j < N; j++) {
+            sum +=
+              matrix[i][j] *
+              Math.cos(((2 * i + 1) * u * PI) / (2 * N)) *
+              Math.cos(((2 * j + 1) * v * PI) / (2 * N));
+          }
+        }
+        const cu = u === 0 ? Math.sqrt(1 / N) : Math.sqrt(2 / N);
+        const cv = v === 0 ? Math.sqrt(1 / N) : Math.sqrt(2 / N);
+        out[u][v] = cu * cv * sum;
+      }
+    }
+    return out;
+  }
+
+  const dct = dct2D(pixels);
+  const vals: number[] = [];
+  for (let y = 0; y < SMALL; y++) {
+    for (let x = 0; x < SMALL; x++) {
+      vals.push(dct[y][x]);
+    }
+  }
+  const sorted = Array.from(vals).sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  const median = sorted.length % 2 === 1 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+  const bits = vals.map((v) => (v > median ? '1' : '0')).join('');
   const hex = BigInt('0b' + bits).toString(16).padStart(16, '0');
   return hex;
 }
@@ -63,7 +107,7 @@ export async function POST(req: NextRequest) {
       fileBuffer = Buffer.from(match[2], 'base64');
     }
 
-    const queryPhash = await computeAHashFromBuffer(fileBuffer!);
+    const queryPhash = await computePHashFromBuffer(fileBuffer!);
 
     // Compare against dataset
     const threshold = Number(req.nextUrl.searchParams.get('threshold') ?? DEFAULT_THRESHOLD);
@@ -76,9 +120,9 @@ export async function POST(req: NextRequest) {
     // Deduplicate by product key (prefer productId; fallback to filename base)
     const byProduct = new Map<string, { filename: string; phash: string; productId: string | null; distance: number }>();
     for (const e of filtered) {
-  // Prefer productId when available; otherwise use folder name (first segment) so different
-  // variants stored in different folders are treated as separate products.
-  const key = e.productId ?? (e.filename.includes('/') ? e.filename.split('/')[0] : e.filename.replace(/\..+$/, ''));
+      // Prefer productId when available; otherwise use folder name (first segment) so different
+      // variants stored in different folders are treated as separate products.
+      const key = e.productId ?? (e.filename.includes('/') ? e.filename.split('/')[0] : e.filename.replace(/\..+$/, ''));
       const existing = byProduct.get(key);
       if (!existing || e.distance < existing.distance) {
         byProduct.set(key, { filename: e.filename, phash: e.phash, productId: e.productId, distance: e.distance });

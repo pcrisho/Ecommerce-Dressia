@@ -20,6 +20,8 @@ export default function Home() {
   const [imageSearchResults, setImageSearchResults] = useState<Dress[]>([]);
   const [aiMessage, setAiMessage] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // Modal state for product details
+  const [selectedDress, setSelectedDress] = useState<Dress | null>(null);
 
   const filteredDresses = useMemo(() => {
     if (!searchTerm) return allDresses;
@@ -158,7 +160,7 @@ export default function Home() {
                   </div>
                   <div className="text-center md:text-left">
                     {isLoadingImage && (
-                       <div className="flex items-center justify-center flex-col gap-2">
+                      <div className="flex items-center justify-center flex-col gap-2">
                         <Loader />
                         <p className="text-muted-foreground">Procesando imagen...</p>
                       </div>
@@ -168,7 +170,7 @@ export default function Home() {
                 </div>
               </div>
             )}
-            
+
             <div
               className={cn(
                 'grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8 transition-opacity duration-500',
@@ -177,12 +179,95 @@ export default function Home() {
             >
               {isImageSearchActive
                 ? imageSearchResults.map((dress) => (
-                    <ProductCard key={dress.id} dress={dress} />
-                  ))
+                  <ProductCard key={dress.id} dress={dress} onViewDetails={(d) => setSelectedDress(d)} />
+                ))
                 : filteredDresses.map((dress) => (
-                    <ProductCard key={dress.id} dress={dress} />
-                  ))}
+                  <ProductCard key={dress.id} dress={dress} onViewDetails={(d) => setSelectedDress(d)} />
+                ))}
             </div>
+
+            {/* Product details modal */}
+            {selectedDress && (
+              <div className="fixed inset-0 z-50 flex items-center justify-center">
+                <div className="absolute inset-0 bg-black/40" onClick={() => setSelectedDress(null)} />
+                <div className="relative max-w-3xl w-full mx-4 bg-white dark:bg-gray-900 rounded-lg shadow-lg p-6 z-10">
+                  <div className="flex justify-between items-start gap-4">
+                    <h3 className="text-2xl font-bold">Detalle del producto</h3>
+                    <button
+                      className="text-muted-foreground hover:text-foreground"
+                      onClick={() => setSelectedDress(null)}
+                      aria-label="Cerrar"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                  <div className="mt-4 grid grid-cols-1 md:grid-cols-3 gap-6">
+                    <div className="w-full h-64 relative rounded overflow-hidden bg-muted">
+                      <Image
+                        src={selectedDress.image.imageUrl}
+                        alt={selectedDress.nombre}
+                        fill
+                        className="object-cover"
+                      />
+                    </div>
+                    <div className="md:col-span-2">
+                      <h4 className="text-xl font-semibold">{selectedDress.nombre}</h4>
+                      <p className="text-lg text-primary font-bold mt-1">{formatPrice(selectedDress.precio)}</p>
+
+                      <div className="mt-4 prose prose-sm max-w-none text-justify">
+                        {selectedDress.descripcion ? (
+                          <p>{selectedDress.descripcion}</p>
+                        ) : (
+                          <p>{selectedDress.shortDescription ?? ''}</p>
+                        )}
+
+                        <h5 className="mt-4 font-semibold">Ficha del producto</h5>
+                        <ul className="list-disc ml-5">
+                          {selectedDress.marca && (
+                            <li><strong>Marca:</strong> {selectedDress.marca}</li>
+                          )}
+                          <li><strong>Modelo:</strong> {selectedDress.modelo ?? selectedDress.nombre}</li>
+                          {selectedDress.tipo && <li><strong>Tipo:</strong> {selectedDress.tipo}</li>}
+                          {selectedDress.genero && <li><strong>Género:</strong> {selectedDress.genero}</li>}
+                          {selectedDress.fit && <li><strong>Fit:</strong> {selectedDress.fit}</li>}
+                          {selectedDress.material && <li><strong>Material principal:</strong> {selectedDress.material}</li>}
+                          {selectedDress.composicion && <li><strong>Composición:</strong> {selectedDress.composicion}</li>}
+                          {selectedDress.temporada && <li><strong>Temporada:</strong> {selectedDress.temporada}</li>}
+                          {selectedDress.largo_mangas && <li><strong>Largo de mangas:</strong> {selectedDress.largo_mangas}</li>}
+                          {selectedDress.diseno && <li><strong>Diseño:</strong> {selectedDress.diseno}</li>}
+                          {selectedDress.estilo && <li><strong>Estilo:</strong> {selectedDress.estilo}</li>}
+                          {selectedDress.hecho_en && <li><strong>Hecho en:</strong> {selectedDress.hecho_en}</li>}
+                          {selectedDress.condicion && <li><strong>Condición del producto:</strong> {selectedDress.condicion}</li>}
+                          {selectedDress.tallas && <li><strong>Tallas:</strong> {selectedDress.tallas.join(', ')}</li>}
+                          {selectedDress.colores && <li><strong>Colores:</strong> {selectedDress.colores.join(', ')}</li>}
+                        </ul>
+
+                        <div className="mt-6 flex gap-3">
+                          {selectedDress.contactPhone ? (
+                            <a
+                              href={`https://wa.me/${selectedDress.contactPhone}?text=${encodeURIComponent(`Hola, quisiera consultar sobre ${selectedDress.modelo ?? selectedDress.nombre}`)}`}
+                              target="_blank"
+                              rel="noreferrer"
+                            >
+                              <Button variant="default">Contactar con un asesor</Button>
+                            </a>
+                          ) : (
+                            <a
+                              href={`https://wa.me/?text=${encodeURIComponent(`Hola, quisiera consultar sobre ${selectedDress.modelo ?? selectedDress.nombre}`)}`}
+                              target="_blank"
+                              rel="noreferrer"
+                            >
+                              <Button variant="default">Contactar con un asesor</Button>
+                            </a>
+                          )}
+                          <Button variant="ghost" onClick={() => setSelectedDress(null)}>Cerrar</Button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
 
             {!isImageSearchActive && filteredDresses.length === 0 && (
               <div className="text-center py-16">
