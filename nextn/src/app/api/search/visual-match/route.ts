@@ -7,7 +7,7 @@ import { vestidos as allDresses } from '@/lib/data';
 
 const DATA_FILE = path.join(process.cwd(), 'data', 'training_phashes.json');
 const VECTOR_BITS = 64; // pHash 8x8 -> 64 bits
-const DEFAULT_THRESHOLD = 20; // more permissive by default (64-bit space)
+const DEFAULT_THRESHOLD = 24; // more permissive by default (combined score)
 
 // Convert hex (16 chars -> 64 bits) to a binary string of length 64
 function hexToBin64(hex: string): string {
@@ -91,6 +91,32 @@ async function computeAHashFromBuffer(buffer: Buffer): Promise<string> {
   return hex;
 }
 
+// Compute average color hex from buffer (RGB) using 1x1 resize
+async function computeAvgColorHex(buffer: Buffer): Promise<string> {
+  const SIZE = 1;
+  const raw = await sharp(buffer).resize(SIZE, SIZE, { fit: 'fill' }).raw().toBuffer();
+  const r = raw[0];
+  const g = raw[1];
+  const b = raw[2];
+  const hex = ((r << 16) | (g << 8) | b).toString(16).padStart(6, '0');
+  return hex;
+}
+
+function hexToRgb(hex: string) {
+  const h = hex.replace(/^#/, '').padStart(6, '0');
+  const r = parseInt(h.slice(0, 2), 16);
+  const g = parseInt(h.slice(2, 4), 16);
+  const b = parseInt(h.slice(4, 6), 16);
+  return { r, g, b };
+}
+
+function colorDistanceRgb(a: { r: number; g: number; b: number }, b: { r: number; g: number; b: number }) {
+  const dr = a.r - b.r;
+  const dg = a.g - b.g;
+  const db = a.b - b.b;
+  return Math.sqrt(dr * dr + dg * dg + db * db);
+}
+
 export async function POST(req: NextRequest) {
   try {
     // Load precomputed phashes
@@ -121,19 +147,27 @@ export async function POST(req: NextRequest) {
 
     const queryPhash = await computePHashFromBuffer(fileBuffer!);
     const queryAhash = await computeAHashFromBuffer(fileBuffer!);
+    const queryColorHex = await computeAvgColorHex(fileBuffer!);
 
     // Compare against dataset
     const threshold = Number(req.nextUrl.searchParams.get('threshold') ?? DEFAULT_THRESHOLD);
-    // Combine pHash + aHash distances (weighted) to be more robust to variations
-    const weightP = 0.6; // give more weight to perceptual hash
-    const weightA = 1 - weightP;
+    // Combine pHash + aHash + color distances (weighted)
+    const weightP = 0.5;
+    const weightA = 0.3;
+    const weightC = 0.2;
+    const maxColorDist = Math.sqrt(3 * 255 * 255); // ~441.67
     const scored = phashes.map((entry) => {
       const dp = hammingDistanceHex(queryPhash, entry.phash);
-      // entry may have ahash (from updated generate_phashes); if not, fallback to pHash
       const entryA = (entry as any).ahash ?? entry.phash;
       const da = hammingDistanceHex(queryAhash, entryA);
-      const combined = Math.round(dp * weightP + da * weightA);
-      return { ...entry, distance: combined, rawDistanceP: dp, rawDistanceA: da };
+      const entryColorHex = (entry as any).color ?? entry.phash.slice(0, 6);
+      const rgbQ = hexToRgb(queryColorHex);
+      const rgbE = hexToRgb(entryColorHex);
+      const colorDist = colorDistanceRgb(rgbQ, rgbE);
+      // normalize color dist to 0..VECTOR_BITS (so scales are similar to hamming on 64-bit)
+      const colorNorm = Math.round((colorDist / maxColorDist) * VECTOR_BITS);
+      const combined = Math.round(dp * weightP + da * weightA + colorNorm * weightC);
+      return { ...entry, distance: combined, rawDistanceP: dp, rawDistanceA: da, rawColorDist: Math.round(colorDist) };
     });
 
     // Filter by threshold

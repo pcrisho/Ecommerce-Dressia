@@ -138,4 +138,30 @@ export const vestidos: Dress[] = [
     colores: ['Rojo']
   },
 
+  // New product: Top Negro Asimétrico (Sorelle)
+  {
+    id: '7',
+    nombre: 'Top Negro Asimétrico',
+    modelo: 'Top Negro Asimétrico',
+    marca: 'Sorelle',
+    precio: 85,
+    image: dressImages.find(i => i.id === 'dress-top-negro') || dressImages[0],
+    shortDescription: 'Top negro asimétrico de un solo tirante, estilo casual y pegado al cuerpo.',
+    descripcion: `Ficha del producto:\n\nMarca: Sorelle\nModelo: Top Negro Asimétrico\nTipo: Top\nTipo de cuello: Un solo tirante (asimétrico)\nGénero: Mujer\nFit: Pegado\nMaterial principal: Rib\nComposición: 95% Algodón – 5% Spandex\nTemporada: Primavera–Verano\nLargo de mangas: Sin mangas\nDiseño: Liso\nEstilo: Casual\nHecho en: Perú\nCondición del producto: Nuevo`,
+    tipo: 'Top',
+    genero: 'Mujer',
+    fit: 'Pegado',
+    material: 'Rib',
+    composicion: '95% Algodón, 5% Spandex',
+    temporada: 'Primavera - Verano',
+    largo_mangas: 'Sin mangas',
+    diseno: 'Liso',
+    estilo: 'Casual',
+    hecho_en: 'Perú',
+    condicion: 'Nuevo',
+    tallas: ['S', 'M', 'L'],
+    colores: ['Negro'],
+    contactPhone: '51932380544'
+  },
+
 ];

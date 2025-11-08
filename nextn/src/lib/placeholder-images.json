@@ -42,5 +42,12 @@
       "imageUrl": "/Bembella-red.jpeg",
       "imageHint": "golden dress"
     }
+        ,
+        {
+          "id": "dress-top-negro",
+          "description": "Top negro asimétrico - imagen de entrenamiento.",
+          "imageUrl": "/ENTRENAMIENTO/Top Negro/Screenshot 2025-11-08 181607.png",
+          "imageHint": "top negro asimetrico"
+        }
   ]
 }

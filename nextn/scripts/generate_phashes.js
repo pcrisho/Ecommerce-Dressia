@@ -80,6 +80,17 @@ async function computeAHash(buffer) {
   const hex = BigInt('0b' + bits).toString(16).padStart(16, '0');
   return hex;
 }
+ 
+// Compute average color (RGB) as hex string, using a 1x1 resize for speed
+async function computeAvgColor(buffer) {
+  const raw = await sharp(buffer).resize(1, 1, { fit: 'fill' }).raw().toBuffer();
+  // raw[0]=R, [1]=G, [2]=B
+  const r = raw[0];
+  const g = raw[1];
+  const b = raw[2];
+  const hex = ((r << 16) | (g << 8) | b).toString(16).padStart(6, '0');
+  return { r, g, b, hex };
+}
 
 function readProductMapping() {
   // Try to read src/lib/data.ts and extract { id, nombre } pairs so we can map folder names -> product ids
@@ -125,8 +136,9 @@ function walkDir(dir) {
   for (const p of files) {
     try {
       const buf = fs.readFileSync(p);
-      const phash = await computePHash(buf);
-      const ahash = await computeAHash(buf);
+  const phash = await computePHash(buf);
+  const ahash = await computeAHash(buf);
+  const avg = await computeAvgColor(buf);
       const rel = path.relative(TRAIN_DIR, p).replace(/\\/g, '/');
       const parts = rel.split('/');
       const folder = parts.length > 1 ? parts[0] : null;
@@ -139,8 +151,8 @@ function walkDir(dir) {
         if (found) productId = found.id;
       }
 
-  out.push({ filename: rel, phash, ahash, productId });
-  console.log('Processed', rel, '->', phash, ahash, 'productId=', productId);
+  out.push({ filename: rel, phash, ahash, color: avg.hex, productId });
+  console.log('Processed', rel, '->', phash, ahash, avg.hex, 'productId=', productId);
     } catch (err) {
       console.error('Failed to process', p, err);
     }
