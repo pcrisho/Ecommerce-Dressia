@@ -27,7 +27,7 @@ export const vestidos: Dress[] = [
     condicion: 'Nuevo',
     tallas: ['S', 'M', 'L'],
     colores: ['Blanco'],
-    contactPhone: '51XXXXXXXXX'
+    contactPhone: '51932380544'
   },
   {
     id: '2',
@@ -51,7 +51,7 @@ export const vestidos: Dress[] = [
     condicion: 'Nuevo',
     tallas: ['S', 'M', 'L'],
     colores: ['Negro'],
-    contactPhone: '51XXXXXXXXX'
+    contactPhone: '51932380544'
   },
   {
     id: '3',
@@ -75,7 +75,7 @@ export const vestidos: Dress[] = [
     condicion: 'Nuevo',
     tallas: ['S', 'M', 'L'],
     colores: ['Blanco'],
-    contactPhone: '51XXXXXXXXX'
+    contactPhone: '51932380544'
   },
   {
     id: '4',
@@ -99,7 +99,7 @@ export const vestidos: Dress[] = [
     condicion: 'Nuevo',
     tallas: ['S', 'M', 'L'],
     colores: ['Variante'],
-    contactPhone: '51XXXXXXXXX'
+    contactPhone: '51932380544'
   },
   {
     id: '5',
@@ -123,7 +123,7 @@ export const vestidos: Dress[] = [
     condicion: 'Nuevo',
     tallas: ['S', 'M', 'L'],
     colores: ['Variante'],
-    contactPhone: '51XXXXXXXXX'
+    contactPhone: '51932380544'
   },
   {
     id: '6',
