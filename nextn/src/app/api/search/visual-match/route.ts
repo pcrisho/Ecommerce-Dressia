@@ -110,11 +110,46 @@ function hexToRgb(hex: string) {
   return { r, g, b };
 }
 
+function rgbToHsl(r: number, g: number, b: number) {
+  r /= 255;
+  g /= 255;
+  b /= 255;
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  let h = 0, s = 0, l = (max + min) / 2;
+
+  if (max !== min) {
+    const d = max - min;
+    s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+    switch (max) {
+      case r: h = (g - b) / d + (g < b ? 6 : 0); break;
+      case g: h = (b - r) / d + 2; break;
+      case b: h = (r - g) / d + 4; break;
+    }
+    h /= 6;
+  }
+  return { h: h * 360, s: s * 100, l: l * 100 };
+}
+
 function colorDistanceRgb(a: { r: number; g: number; b: number }, b: { r: number; g: number; b: number }) {
-  const dr = a.r - b.r;
-  const dg = a.g - b.g;
-  const db = a.b - b.b;
-  return Math.sqrt(dr * dr + dg * dg + db * db);
+  // Convert both colors to HSL
+  const hslA = rgbToHsl(a.r, a.g, a.b);
+  const hslB = rgbToHsl(b.r, b.g, b.b);
+  
+  // Compute weighted distance in HSL space
+  const dh = Math.min(Math.abs(hslA.h - hslB.h), 360 - Math.abs(hslA.h - hslB.h)) / 180.0;
+  const ds = Math.abs(hslA.s - hslB.s) / 100.0;
+  const dl = Math.abs(hslA.l - hslB.l) / 100.0;
+  
+  // Give more weight to hue differences for saturated colors
+  const saturationWeight = (hslA.s + hslB.s) / 200.0;
+  const hueWeight = 2.0 * saturationWeight;
+  
+  return Math.sqrt(
+    (dh * dh * hueWeight) +
+    (ds * ds * 1.0) +
+    (dl * dl * 0.5)
+  ) * 255; // Scale to similar range as RGB distance
 }
 
 export async function POST(req: NextRequest) {
@@ -152,9 +187,9 @@ export async function POST(req: NextRequest) {
     // Compare against dataset
     const threshold = Number(req.nextUrl.searchParams.get('threshold') ?? DEFAULT_THRESHOLD);
     // Combine pHash + aHash + color distances (weighted)
-    const weightP = 0.5;
-    const weightA = 0.3;
-    const weightC = 0.2;
+    const weightP = 0.4;  // reduced pHash weight
+    const weightA = 0.3;  // kept aHash weight
+    const weightC = 0.3;  // increased color weight
     const maxColorDist = Math.sqrt(3 * 255 * 255); // ~441.67
     const scored = phashes.map((entry) => {
       const dp = hammingDistanceHex(queryPhash, entry.phash);

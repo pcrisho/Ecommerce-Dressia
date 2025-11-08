@@ -43,52 +43,47 @@ export default function Home() {
     setAiMessage(null);
     setImageSearchResults([]);
 
-    // Show preview
-    const reader = new FileReader();
-    reader.readAsDataURL(file);
-    reader.onloadend = async () => {
-      const base64Data = reader.result as string;
-      setImagePreview(base64Data);
+    try {
+      // Show preview first
+      const previewUrl = URL.createObjectURL(file);
+      setImagePreview(previewUrl);
 
-      try {
-        // Upload file using FormData to the visual-match API route
-        const fd = new FormData();
-        fd.append('file', file);
+      // Upload file using FormData
+      const formData = new FormData();
+      formData.append('file', file);
 
-        const resp = await fetch('/api/search/visual-match', {
-          method: 'POST',
-          body: fd,
-        });
+      const response = await fetch('/api/search/visual-match', {
+        method: 'POST',
+        body: formData,
+      });
 
-        if (!resp.ok) {
-          const text = await resp.text();
-          setAiMessage('Error en búsqueda por imagen');
-          console.error('visual-match error', resp.status, text);
-          setIsLoadingImage(false);
-          return;
-        }
-
-        const json = await resp.json();
-
-        const results = json.results ?? [];
-        const products: Dress[] = results
-          .map((r: any) => r.product)
-          .filter(Boolean);
-
-        if (products.length > 0) {
-          setAiMessage(`Se encontraron ${products.length} coincidencia(s)`);
-          setImageSearchResults(products);
-        } else {
-          setAiMessage('No se encontraron coincidencias.');
-          setImageSearchResults([]);
-        }
-      } catch (err) {
-        console.error('Error uploading image for visual match', err);
-        setAiMessage('Error procesando la imagen.');
-      } finally {
-        setIsLoadingImage(false);
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error('Error en búsqueda visual:', response.status, errorText);
+        throw new Error('Error al procesar la imagen');
       }
-    };
+
+      const data = await response.json();
+      const results = data.results || [];
+      const products: Dress[] = results
+        .map((r: any) => r.product)
+        .filter(Boolean);
+
+      if (products.length > 0) {
+        setAiMessage(`Se encontraron ${products.length} coincidencia(s)`);
+        setImageSearchResults(products);
+      } else {
+        setAiMessage('No se encontraron coincidencias');
+        setImageSearchResults([]);
+      }
+    } catch (error) {
+      console.error('Error en búsqueda por imagen:', error);
+      setAiMessage(error instanceof Error ? error.message : 'Error procesando la imagen');
+      setImageSearchResults([]);
+    } finally {
+      setIsLoadingImage(false);
+      URL.revokeObjectURL(imagePreview as string);
+    }
   };
 
   const isSearching = searchTerm.length > 0;
@@ -103,7 +98,7 @@ export default function Home() {
   return (
     <div className="flex flex-col min-h-screen bg-background">
       <Header />
-      <main className="flex-grow pt-16">
+      <main className="grow pt-16">
         <div className="container mx-auto px-4 py-8 md:py-12">
           <section className="text-center mb-12 max-w-2xl mx-auto">
             <div className="relative mb-4">
@@ -147,7 +142,7 @@ export default function Home() {
             {isImageSearchActive && (
               <div className="flex flex-col items-center mb-8 gap-6 p-6 border rounded-lg max-w-3xl mx-auto bg-card shadow-sm">
                 <div className="flex flex-col md:flex-row items-center gap-6 w-full">
-                  <div className="w-40 h-60 relative flex-shrink-0">
+                  <div className="w-40 h-60 relative shrink-0">
                     {imagePreview && (
                       <Image
                         src={imagePreview}

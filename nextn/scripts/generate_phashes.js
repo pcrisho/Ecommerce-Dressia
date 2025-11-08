@@ -81,15 +81,70 @@ async function computeAHash(buffer) {
   return hex;
 }
  
-// Compute average color (RGB) as hex string, using a 1x1 resize for speed
+// Compute dominant color (RGB) using color quantization and dominant color detection
 async function computeAvgColor(buffer) {
-  const raw = await sharp(buffer).resize(1, 1, { fit: 'fill' }).raw().toBuffer();
-  // raw[0]=R, [1]=G, [2]=B
-  const r = raw[0];
-  const g = raw[1];
-  const b = raw[2];
-  const hex = ((r << 16) | (g << 8) | b).toString(16).padStart(6, '0');
-  return { r, g, b, hex };
+  const size = 64; // Increased size for better sampling
+  
+  // Convert to raw pixels with more accurate color processing
+  const raw = await sharp(buffer)
+    .resize(size, size, { fit: 'cover' })
+    .removeAlpha()  // Ensure we're working with RGB only
+    .raw()
+    .toBuffer();
+
+  // Create bins for color clustering
+  const bins = new Map();
+  const binSize = 32; // Color quantization level
+  
+  for (let i = 0; i < raw.length; i += 3) {
+    const r = raw[i];
+    const g = raw[i + 1];
+    const b = raw[i + 2];
+    
+    // Skip very dark or very light colors (likely background)
+    const brightness = (r + g + b) / 3;
+    if (brightness < 20 || brightness > 235) continue;
+    
+    // Quantize colors into bins
+    const binR = Math.floor(r / binSize) * binSize;
+    const binG = Math.floor(g / binSize) * binSize;
+    const binB = Math.floor(b / binSize) * binSize;
+    
+    const key = `${binR},${binG},${binB}`;
+    
+    // Calculate color significance
+    const saturation = Math.max(r, g, b) - Math.min(r, g, b);
+    const significance = saturation * (1 + Math.max(r/255, g/255, b/255)); // Consider both saturation and intensity
+    
+    if (!bins.has(key)) {
+      bins.set(key, { r: 0, g: 0, b: 0, count: 0, totalSignificance: 0 });
+    }
+    
+    const bin = bins.get(key);
+    bin.r += r * significance;
+    bin.g += g * significance;
+    bin.b += b * significance;
+    bin.count++;
+    bin.totalSignificance += significance;
+  }
+  
+  // Find the most significant color cluster
+  let maxSignificance = 0;
+  let dominantColor = { r: 0, g: 0, b: 0 };
+  
+  for (const bin of bins.values()) {
+    if (bin.totalSignificance > maxSignificance) {
+      maxSignificance = bin.totalSignificance;
+      dominantColor = {
+        r: Math.round(bin.r / bin.totalSignificance),
+        g: Math.round(bin.g / bin.totalSignificance),
+        b: Math.round(bin.b / bin.totalSignificance)
+      };
+    }
+  }
+  
+  const hex = ((dominantColor.r << 16) | (dominantColor.g << 8) | dominantColor.b).toString(16).padStart(6, '0');
+  return { ...dominantColor, hex };
 }
 
 function readProductMapping() {
