@@ -7,12 +7,63 @@ const TRAIN_DIR = path.join(process.cwd(), 'public', 'entrenamiento');
 const OUT_FILE = path.join(process.cwd(), 'data', 'training_phashes.json');
 const DATA_TS = path.join(process.cwd(), 'src', 'lib', 'data.ts');
 
-async function computeAHash(buffer) {
-  // Resize to 8x8, grayscale, raw pixels
-  const raw = await sharp(buffer).resize(8, 8, { fit: 'fill' }).grayscale().raw().toBuffer();
-  const pixels = Array.from(raw);
-  const avg = pixels.reduce((s, v) => s + v, 0) / pixels.length;
-  const bits = pixels.map((v) => (v > avg ? '1' : '0')).join('');
+// Compute pHash (perceptual hash) from buffer.
+// Algorithm: resize to 32x32 grayscale, compute 2D DCT, keep top-left 8x8, compute median and
+// produce 64-bit hash based on values > median.
+async function computePHash(buffer) {
+  const SIZE = 32;
+  const SMALL = 8;
+  const raw = await sharp(buffer).resize(SIZE, SIZE, { fit: 'fill' }).grayscale().raw().toBuffer();
+  // raw is a Uint8Array-like buffer of length SIZE*SIZE
+  const pixels = [];
+  for (let y = 0; y < SIZE; y++) {
+    const row = [];
+    for (let x = 0; x < SIZE; x++) {
+      row.push(raw[y * SIZE + x]);
+    }
+    pixels.push(row);
+  }
+
+  // 2D DCT (naive implementation) on SIZE x SIZE
+  function dct2D(matrix) {
+    const N = SIZE;
+    const out = Array.from({ length: N }, () => new Array(N).fill(0));
+    const PI = Math.PI;
+    for (let u = 0; u < N; u++) {
+      for (let v = 0; v < N; v++) {
+        let sum = 0;
+        for (let i = 0; i < N; i++) {
+          for (let j = 0; j < N; j++) {
+            sum +=
+              matrix[i][j] *
+              Math.cos(((2 * i + 1) * u * PI) / (2 * N)) *
+              Math.cos(((2 * j + 1) * v * PI) / (2 * N));
+          }
+        }
+        const cu = u === 0 ? Math.sqrt(1 / N) : Math.sqrt(2 / N);
+        const cv = v === 0 ? Math.sqrt(1 / N) : Math.sqrt(2 / N);
+        out[u][v] = cu * cv * sum;
+      }
+    }
+    return out;
+  }
+
+  const dct = dct2D(pixels);
+
+  // take top-left SMALL x SMALL block
+  const vals = [];
+  for (let y = 0; y < SMALL; y++) {
+    for (let x = 0; x < SMALL; x++) {
+      vals.push(dct[y][x]);
+    }
+  }
+
+  // compute median
+  const sorted = Array.from(vals).sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  const median = sorted.length % 2 === 1 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+
+  const bits = vals.map((v) => (v > median ? '1' : '0')).join('');
   const hex = BigInt('0b' + bits).toString(16).padStart(16, '0');
   return hex;
 }
