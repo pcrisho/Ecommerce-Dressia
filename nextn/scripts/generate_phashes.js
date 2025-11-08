@@ -112,7 +112,7 @@ function walkDir(dir) {
   for (const p of files) {
     try {
       const buf = fs.readFileSync(p);
-      const phash = await computeAHash(buf);
+    const phash = await computePHash(buf);
       const rel = path.relative(TRAIN_DIR, p).replace(/\\/g, '/');
       const parts = rel.split('/');
       const folder = parts.length > 1 ? parts[0] : null;
