@@ -11,10 +11,37 @@ async function computeAHash(buffer) {
   // Resize to 8x8, grayscale, raw pixels
   const raw = await sharp(buffer).resize(8, 8, { fit: 'fill' }).grayscale().raw().toBuffer();
   const pixels = Array.from(raw);
-  const avg = pixels.reduce((s, v) => s + v, 0) / pixels.length;
+  // Ignore almost-white pixels (likely background) when computing the average
+  const fg = pixels.filter((v) => v < 250);
+  const used = fg.length ? fg : pixels;
+  const avg = used.reduce((s, v) => s + v, 0) / used.length;
   const bits = pixels.map((v) => (v > avg ? '1' : '0')).join('');
   const hex = BigInt('0b' + bits).toString(16).padStart(16, '0');
   return hex;
+}
+
+async function computeAvgColor(buffer) {
+  // Resize to small thumbnail and compute average RGB ignoring white background
+  const size = 32;
+  const { data, info } = await sharp(buffer).resize(size, size, { fit: 'fill' }).raw().toBuffer({ resolveWithObject: true });
+  const pixels = data; // Uint8Array-like
+  const channels = info.channels || 3;
+  let r = 0, g = 0, b = 0, count = 0;
+  for (let i = 0; i < pixels.length; i += channels) {
+    const pr = pixels[i];
+    const pg = pixels[i + 1];
+    const pb = pixels[i + 2];
+    // treat very-bright pixels as background
+    if (pr > 240 && pg > 240 && pb > 240) continue;
+    r += pr; g += pg; b += pb; count++;
+  }
+  if (count === 0) {
+    // fallback to average of all pixels
+    for (let i = 0; i < pixels.length; i += channels) {
+      r += pixels[i]; g += pixels[i + 1]; b += pixels[i + 2]; count++;
+    }
+  }
+  return { r: Math.round(r / count), g: Math.round(g / count), b: Math.round(b / count) };
 }
 
 function readProductMapping() {
@@ -62,6 +89,7 @@ function walkDir(dir) {
     try {
       const buf = fs.readFileSync(p);
       const phash = await computeAHash(buf);
+      const avgColor = await computeAvgColor(buf);
       const rel = path.relative(TRAIN_DIR, p).replace(/\\/g, '/');
       const parts = rel.split('/');
       const folder = parts.length > 1 ? parts[0] : null;
@@ -74,7 +102,7 @@ function walkDir(dir) {
         if (found) productId = found.id;
       }
 
-      out.push({ filename: rel, phash, productId });
+      out.push({ filename: rel, phash, productId, avgColor });
       console.log('Processed', rel, '->', phash, 'productId=', productId);
     } catch (err) {
       console.error('Failed to process', p, err);
