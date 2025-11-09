@@ -184,7 +184,8 @@ function rgbToHsl(r: number, g: number, b: number) {
   b /= 255;
   const max = Math.max(r, g, b);
   const min = Math.min(r, g, b);
-  let h = 0, s = 0, l = (max + min) / 2;
+  let h = 0, s = 0;
+  const l = (max + min) / 2;
 
   if (max !== min) {
     const d = max - min;
@@ -236,8 +237,9 @@ export async function POST(req: NextRequest) {
       const form = await req.formData();
       const file = form.get('file') || form.get('image');
       if (!file) return NextResponse.json({ error: 'No file provided' }, { status: 400 });
-      const ab = await (file as any).arrayBuffer();
-      fileBuffer = Buffer.from(ab);
+  const fileLike = file as { arrayBuffer: () => Promise<ArrayBuffer> };
+  const ab = await fileLike.arrayBuffer();
+  fileBuffer = Buffer.from(ab);
     } else {
       // try JSON body with dataUri
       const json = await req.json().catch(() => ({}));
@@ -261,11 +263,26 @@ export async function POST(req: NextRequest) {
     const weightA = 0.3;  // kept aHash weight
     const weightC = 0.3;  // increased color weight
     const maxColorDist = Math.sqrt(3 * 255 * 255); // ~441.67
-    const scored = phashes.map((entry) => {
+    type PhashEntry = { filename: string; phash: string; productId?: string | null; ahash?: string; color?: string };
+    type ScoredEntry = PhashEntry & {
+      distance: number;
+      rawDistanceP: number;
+      rawDistanceA: number;
+      rawColorDist?: number;
+      rawHueDiff?: number;
+      rawSaturationQ?: number;
+      rawSaturationE?: number;
+      rawLightQ?: number;
+      rawLightE?: number;
+      isEntryBlack?: boolean;
+      isEntryWhite?: boolean;
+    };
+
+    const scored: ScoredEntry[] = phashes.map((entry: PhashEntry) => {
       const dp = hammingDistanceHex(queryPhash, entry.phash);
-      const entryA = (entry as any).ahash ?? entry.phash;
+      const entryA = entry.ahash ?? entry.phash;
       const da = hammingDistanceHex(queryAhash, entryA);
-      const entryColorHex = (entry as any).color ?? entry.phash.slice(0, 6);
+      const entryColorHex = entry.color ?? entry.phash.slice(0, 6);
       const rgbQ = hexToRgb(queryColorHex);
       const rgbE = hexToRgb(entryColorHex);
       const colorDist = colorDistanceRgb(rgbQ, rgbE);
@@ -337,9 +354,9 @@ export async function POST(req: NextRequest) {
           combined += 500;
         }
 
-        return { ...entry, distance: combined, rawDistanceP: dp, rawDistanceA: da, rawColorDist: Math.round(colorDist), rawHueDiff: Math.round(hueDiff), rawSaturationQ: Math.round(hslQ.s), rawSaturationE: Math.round(hslE.s), rawLightQ: Math.round(hslQ.l), rawLightE: Math.round(hslE.l), isEntryBlack, isEntryWhite };
+        return { ...entry, distance: combined, rawDistanceP: dp, rawDistanceA: da, rawColorDist: Math.round(colorDist), rawHueDiff: Math.round(hueDiff), rawSaturationQ: Math.round(hslQ.s), rawSaturationE: Math.round(hslE.s), rawLightQ: Math.round(hslQ.l), rawLightE: Math.round(hslE.l), isEntryBlack, isEntryWhite } as ScoredEntry;
       } catch (e) {
-        return { ...entry, distance: combined, rawDistanceP: dp, rawDistanceA: da, rawColorDist: Math.round(colorDist) };
+        return { ...entry, distance: combined, rawDistanceP: dp, rawDistanceA: da, rawColorDist: Math.round(colorDist) } as ScoredEntry;
       }
     });
 
@@ -381,30 +398,30 @@ export async function POST(req: NextRequest) {
       // Lógica estricta mejorada para negro/blanco:
       if (isQueryBlack) {
         // Si la búsqueda es negra, SOLO mostrar prendas negras
-        if (!(s as any).isEntryBlack) {
+        if (!s.isEntryBlack) {
           console.log('Filtered out non-black result for black query:', s.filename);
           return false;
         }
       } else if (isQueryWhite) {
         // Si la búsqueda es blanca, SOLO mostrar prendas blancas
-        if (!(s as any).isEntryWhite) {
+        if (!s.isEntryWhite) {
           console.log('Filtered out non-white result for white query:', s.filename);
           return false;
         }
       } else {
         // Si la búsqueda no es ni negra ni blanca, NO mostrar prendas negras ni blancas
-        if ((s as any).isEntryBlack || (s as any).isEntryWhite) {
+        if (s.isEntryBlack || s.isEntryWhite) {
           console.log('Filtered out B/W result for colored query:', s.filename);
           return false;
         }
       }
 
-    // Accept color match regardless of query saturation (some garments are patterned/low-sat)
-    const passHash = (typeof s.rawDistanceP === 'number' && s.rawDistanceP <= PHASH_STRICT) || (typeof s.rawDistanceA === 'number' && s.rawDistanceA <= AHASH_STRICT);
-    const passColor = typeof s.rawColorDist === 'number' && s.rawColorDist <= COLOR_DIST_ACCEPT;
+      // Accept color match regardless of query saturation (some garments are patterned/low-sat)
+      const passHash = (typeof s.rawDistanceP === 'number' && s.rawDistanceP <= PHASH_STRICT) || (typeof s.rawDistanceA === 'number' && s.rawDistanceA <= AHASH_STRICT);
+      const passColor = typeof s.rawColorDist === 'number' && s.rawColorDist <= COLOR_DIST_ACCEPT;
 
-    // If neither hash nor color passes, reject
-    return passHash || passColor;
+      // If neither hash nor color passes, reject
+      return passHash || passColor;
     });
 
     // Deduplicate by product key (prefer productId; fallback to filename base)
@@ -415,7 +432,7 @@ export async function POST(req: NextRequest) {
       const key = e.productId ?? (e.filename.includes('/') ? e.filename.split('/')[0] : e.filename.replace(/\..+$/, ''));
       const existing = byProduct.get(key);
       if (!existing || e.distance < existing.distance) {
-        byProduct.set(key, { filename: e.filename, phash: e.phash, productId: e.productId, distance: e.distance });
+        byProduct.set(key, { filename: e.filename, phash: e.phash, productId: e.productId ?? null, distance: e.distance });
       }
     }
 
