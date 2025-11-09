@@ -18,7 +18,10 @@ export default function Home() {
   const [imagePreview, setImagePreview] = useState<string | null>(null);
   const [isLoadingImage, setIsLoadingImage] = useState(false);
   const [imageSearchResults, setImageSearchResults] = useState<Dress[]>([]);
+  const [imageSearchUnmatched, setImageSearchUnmatched] = useState<Array<{ filename: string; score: number }>>([]);
   const [aiMessage, setAiMessage] = useState<string | null>(null);
+  // Default to using Vertex for embeddings unless the user unchecks the box
+  const [preferVertex, setPreferVertex] = useState(true);
   const fileInputRef = useRef<HTMLInputElement>(null);
   // Modal state for product details
   const [selectedDress, setSelectedDress] = useState<Dress | null>(null);
@@ -52,7 +55,8 @@ export default function Home() {
       const formData = new FormData();
       formData.append('file', file);
 
-      const response = await fetch('/api/search/visual-match', {
+      const url = '/api/search/visual-match-vertex' + (preferVertex ? '?prefer=vertex' : '');
+      const response = await fetch(url, {
         method: 'POST',
         body: formData,
       });
@@ -65,16 +69,38 @@ export default function Home() {
 
       const data = await response.json();
       const results = data.results || [];
-      const products: Dress[] = results
-        .map((r: any) => r.product)
-        .filter(Boolean);
 
-      if (products.length > 0) {
-        setAiMessage(`Se encontraron ${products.length} coincidencia(s)`);
+      // Map results: try to resolve product objects; keep unmatched as filename+score
+      type Mapped = { product: Dress | null; filename?: string; score?: number };
+      const mapped: Mapped[] = results.map((r: unknown) => {
+        const o = r as { product?: Dress | null; productId?: string; filename?: string; score?: number };
+        const product = o.product || (o.productId ? allDresses.find((d) => d.id === String(o.productId)) : null);
+        return { product, filename: o.filename, score: o.score } as Mapped;
+      });
+
+      // Deduplicate products by id to avoid rendering items with duplicate React keys
+      const productsMap = new Map<string, Dress>();
+      mapped.forEach((m: Mapped) => {
+        if (m.product) {
+          productsMap.set((m.product as Dress).id, m.product as Dress);
+        }
+      });
+      const products: Dress[] = Array.from(productsMap.values());
+      const unmatched = mapped.filter((m: Mapped) => !m.product).map((m: Mapped) => ({ filename: m.filename || '', score: m.score || 0 }));
+
+      // Show source if present
+      if (data.source) {
+        setAiMessage(`Fuente de embeddings: ${data.source}${data.vertexError ? ' (vertex error: ' + data.vertexError + ')' : ''}`);
+      }
+
+      if (products.length > 0 || unmatched.length > 0) {
+        setAiMessage((prev) => (data.source ? `Fuente de embeddings: ${data.source}` : prev));
         setImageSearchResults(products);
+        setImageSearchUnmatched(unmatched);
       } else {
         setAiMessage('No se encontraron coincidencias');
         setImageSearchResults([]);
+        setImageSearchUnmatched([]);
       }
     } catch (error) {
       console.error('Error en búsqueda por imagen:', error);
@@ -154,6 +180,12 @@ export default function Home() {
                     )}
                   </div>
                   <div className="text-center md:text-left">
+                    <div className="mb-2 flex items-center justify-center md:justify-start gap-3">
+                      <label className="flex items-center gap-2 text-sm">
+                        <input type="checkbox" checked={preferVertex} onChange={(e) => setPreferVertex(e.target.checked)} />
+                        <span>Preferir Vertex</span>
+                      </label>
+                    </div>
                     {isLoadingImage && (
                       <div className="flex items-center justify-center flex-col gap-2">
                         <Loader />
@@ -172,26 +204,32 @@ export default function Home() {
                 isLoadingImage ? 'opacity-0' : 'opacity-100'
               )}
             >
-              {isImageSearchActive
-                ? imageSearchResults.map((dress) => (
+              {isImageSearchActive ? (
+                <>
+                  {imageSearchResults.map((dress) => (
+                    <ProductCard key={dress.id} dress={dress} onViewDetails={(d) => setSelectedDress(d)} />
+                  ))}
+                  {imageSearchUnmatched.map((u, idx) => (
+                    <div key={`unmatched-${idx}`} className="border rounded-lg p-4 bg-white dark:bg-gray-900">
+                      <div className="text-sm text-muted-foreground">Archivo</div>
+                      <div className="font-medium mt-1 wrap-break-word">{u.filename}</div>
+                      <div className="text-sm text-muted-foreground mt-2">Score: {typeof u.score === 'number' ? u.score.toFixed(3) : String(u.score)}</div>
+                    </div>
+                  ))}
+                </>
+              ) : (
+                filteredDresses.map((dress) => (
                   <ProductCard key={dress.id} dress={dress} onViewDetails={(d) => setSelectedDress(d)} />
                 ))
-                : filteredDresses.map((dress) => (
-                  <ProductCard key={dress.id} dress={dress} onViewDetails={(d) => setSelectedDress(d)} />
-                ))}
+              )}
             </div>
 
             {/* Product details modal */}
             {selectedDress && (
               <div className="fixed inset-0 z-50 flex items-center justify-center">
                 <div className="absolute inset-0 bg-black/40" onClick={() => setSelectedDress(null)} />
-                <div
-                  className="relative max-w-3xl w-full mx-4 bg-white dark:bg-gray-900 rounded-lg shadow-lg p-6 z-10"
-                  style={{
-                    maxHeight: '90vh',
-                    overflowY: 'auto',
-                    height: '500px', // alto fijo para móviles, puedes ajustar
-                  }}
+                  <div
+                  className="relative max-w-3xl w-full mx-4 bg-white dark:bg-gray-900 rounded-lg shadow-lg p-6 z-10 max-h-[90vh] overflow-y-auto h-[500px]"
                 >
                   <div className="flex justify-between items-start gap-4">
                     <h3 className="text-2xl font-bold">Detalle del producto</h3>

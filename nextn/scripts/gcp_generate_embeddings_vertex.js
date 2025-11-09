@@ -1,0 +1,247 @@
+#!/usr/bin/env node
+/* eslint-disable @typescript-eslint/no-require-imports */
+/*
+ Generate embeddings for images listed in data/gcp_product_catalog.csv using Vertex AI.
+ This script downloads each image from GCS, and (optionally) sends it to Vertex AI to get an embedding.
+
+ Requirements:
+ - Set GOOGLE_APPLICATION_CREDENTIALS to a service account with Storage and Vertex permissions
+ - Install dependencies: npm i @google-cloud/storage minimist
+
+ Usage (PowerShell):
+  $env:GOOGLE_APPLICATION_CREDENTIALS='C:\path\sa.json'
+  node ./scripts/gcp_generate_embeddings_vertex.js --project project-b38a3360-bca8-40b5-826 --bucket project-b38a3360-bucket-entrenamiento --location us-central1 --model projects/PROJECT/locations/us-central1/publishers/google/models/clip-vit-base-patch32
+
+ Notes:
+ - If --model is not provided, the script will download images and save a placeholder embedding (simple color average) so you can test the search locally.
+ - The output is written to nextn/data/training_embeddings.json
+*/
+
+const fs = require('fs');
+const path = require('path');
+const {Storage} = require('@google-cloud/storage');
+const minimist = require('minimist');
+
+async function readCsv(file) {
+  const txt = fs.readFileSync(file, 'utf8');
+  const lines = txt.split(/\r?\n/).filter(Boolean);
+  const rows = lines.slice(1).map((l) => {
+    // naive CSV parse for our known format
+    const parts = l.split(',');
+    const image_uri = parts[0].replace(/^"|"$/g, '');
+    const product_id = parts[1];
+    const product_category = parts[2] || '';
+    const display_name = (parts[3] || '').replace(/^"|"$/g, '');
+    return { image_uri, product_id, product_category, display_name };
+  });
+  return rows;
+}
+
+function l2normalize(vec) {
+  if (!Array.isArray(vec) || vec.length === 0) return vec;
+  let sum = 0;
+  for (let i = 0; i < vec.length; i++) {
+    const v = Number(vec[i]) || 0;
+    sum += v * v;
+  }
+  const norm = Math.sqrt(sum) || 1;
+  return vec.map((x) => (Number(x) || 0) / norm);
+}
+
+function avgColorFromBuffer(buf) {
+  // very small heuristic: sample some bytes to create a deterministic vector
+  let r = 0, g = 0, b = 0, count = 0;
+  for (let i = 0; i < buf.length; i += Math.max(1, Math.floor(buf.length / 1000))) {
+    const val = buf[i];
+    r = (r + val) % 256;
+    g = (g + ((buf[i + 1] || 0))) % 256;
+    b = (b + ((buf[i + 2] || 0))) % 256;
+    count++;
+  }
+  if (count === 0) return [0,0,0];
+  return [Math.round(r/count), Math.round(g/count), Math.round(b/count)];
+}
+
+// payloadImage can be either { imageBytes: '<base64>' } or { imageUri: 'gs://...' }
+async function callVertexPredict(payloadImage, modelName, project, location) {
+  // Simplified: send a single, production-proven payload and return or throw.
+  // Defensive check: if modelName is a boolean true/false (PowerShell can pass booleans
+  // when env vars are interpolated), reject early with a clear message.
+  if (modelName === true || modelName === false || String(modelName).toLowerCase() === 'true' || String(modelName).toLowerCase() === 'false') {
+    throw new Error(`callVertexPredict: invalid modelName value (${String(modelName)}). Pass the full Vertex model resource path (projects/PROJECT/locations/..../models/...) via --model or VERTEX_MODEL_NAME`);
+  }
+
+  // Resolve effective model name: prefer explicit argument, then env var.
+  let effectiveModel = String(modelName || process.env.VERTEX_MODEL_NAME || '').trim();
+  if (!effectiveModel) {
+    throw new Error('Vertex model name not provided. Set --model or VERTEX_MODEL_NAME to the full model resource path (e.g. projects/PROJECT/locations/us-central1/publishers/google/models/...)');
+  }
+  const url = `https://${location}-aiplatform.googleapis.com/v1/${effectiveModel}:predict`;
+  console.debug('Using Vertex model:', effectiveModel);
+  const token = await getAccessToken();
+
+  if (!payloadImage || !payloadImage.imageBytes) {
+    throw new Error('callVertexPredict: payloadImage.imageBytes is required');
+  }
+
+  // Build single payload; allow optional contextual text alongside the image
+  const instance = { image: { bytesBase64Encoded: payloadImage.imageBytes } };
+  if (payloadImage.contextualText) {
+    instance.contextual_text = String(payloadImage.contextualText);
+  }
+
+  const requestBody = JSON.stringify({ instances: [instance], parameters: {} });
+
+  // Log the request size (do not print full Base64)
+  try {
+    console.debug('Vertex predict URL:', url);
+    console.debug('Vertex request body length:', requestBody.length);
+  } catch (e) {
+    // ignore
+  }
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: requestBody
+  });
+
+  const txt = await res.text();
+  if (!res.ok) {
+    throw new Error('Vertex predict failed: ' + res.status + ' ' + txt);
+  }
+  const json = JSON.parse(txt || '{}');
+  // CRITICAL FIX: only accept a numeric array returned in predictions[0].imageEmbedding
+  // and nothing else. If Vertex doesn't return that array, fail fast so we don't
+  // persist malformed/full-response objects as embeddings (which produced the
+  // previous giant-dimension bug).
+  if (json.predictions && Array.isArray(json.predictions[0]?.imageEmbedding)) {
+    return json.predictions[0].imageEmbedding;
+  }
+  // If we don't find the expected array, throw so caller can handle/fallback and
+  // we avoid saving incorrect data into training_embeddings.json
+  throw new Error('Vertex did not return a valid imageEmbedding array.');
+}
+
+// Provide a camel-cased alias as requested: l2Normalize
+function l2Normalize(vec) {
+  return l2normalize(vec);
+}
+
+async function getAccessToken() {
+  // Use Google ADC to get access token via metadata
+  // When running locally with service account, request a token from googleapis
+  const {GoogleAuth} = require('google-auth-library');
+  // Prefer explicit service account credentials from env var in hosted environments
+  let auth;
+  if (process.env.GCP_SERVICE_ACCOUNT_KEY) {
+    const creds = JSON.parse(process.env.GCP_SERVICE_ACCOUNT_KEY);
+    auth = new GoogleAuth({ credentials: creds, scopes: ['https://www.googleapis.com/auth/cloud-platform'] });
+  } else {
+    auth = new GoogleAuth({ scopes: ['https://www.googleapis.com/auth/cloud-platform'] });
+  }
+  const client = await auth.getClient();
+  const tokenRes = await client.getAccessToken();
+  return tokenRes.token;
+}
+
+async function main() {
+  const argv = minimist(process.argv.slice(2));
+  const project = argv.project || process.env.GOOGLE_CLOUD_PROJECT;
+  const location = argv.location || 'us-central1';
+  const model = argv.model || process.env.VERTEX_MODEL_NAME;
+
+  const catalog = path.join(process.cwd(), 'data', 'gcp_product_catalog.csv');
+  if (!fs.existsSync(catalog)) {
+    console.error('CSV catalog not found at', catalog);
+    process.exit(1);
+  }
+
+  const rows = await readCsv(catalog);
+  if (!rows.length) {
+    console.error('No rows found in catalog');
+    process.exit(1);
+  }
+
+  // Prefer explicit GOOGLE_APPLICATION_CREDENTIALS when present, but allow
+  // Application Default Credentials (ADC) to be used when it's not set. ADC
+  // can be provided via `gcloud auth application-default login` (what you ran)
+  // or via the environment on hosted runtimes. Do not force exit here so the
+  // google-auth-library can fall back through its normal credential chain.
+  if (!process.env.GOOGLE_APPLICATION_CREDENTIALS) {
+    console.warn('GOOGLE_APPLICATION_CREDENTIALS not set — will attempt to use Application Default Credentials (ADC) or other configured auth methods.');
+  }
+
+  // Initialize Storage client; if running in hosted env, prefer credentials from GCP_SERVICE_ACCOUNT_KEY
+  const storageOpts = { projectId: project };
+  if (process.env.GCP_SERVICE_ACCOUNT_KEY) {
+    try {
+      storageOpts.credentials = JSON.parse(process.env.GCP_SERVICE_ACCOUNT_KEY);
+    } catch (e) {
+      console.warn('Failed to parse GCP_SERVICE_ACCOUNT_KEY, falling back to ADC');
+    }
+  }
+  const storage = new Storage(storageOpts);
+  const out = [];
+
+  for (const r of rows) {
+    try {
+      // parse gs://bucket/path
+      const m = r.image_uri.match(/^gs:\/\/([^/]+)\/(.+)$/);
+      if (!m) {
+        console.warn('Skipping non-gs URI', r.image_uri);
+        continue;
+      }
+      const b = storage.bucket(m[1]);
+      const file = b.file(m[2]);
+      const [exists] = await file.exists();
+      if (!exists) {
+        console.warn('File not found in bucket:', r.image_uri);
+        continue;
+      }
+      const [buf] = await file.download();
+
+      // Validate download
+      if (!buf || !(buf instanceof Buffer) || buf.length === 0) {
+        console.error('Downloaded empty or invalid buffer for', r.image_uri);
+        continue;
+      }
+
+      let embedding = null;
+      if (model) {
+        // The model requires image bytes. Encode downloaded buffer to Base64
+        const imageBase64 = buf.toString('base64');
+        console.log('Calling Vertex (imageBytes) for', r.image_uri, `bytes=${buf.length} base64Len=${imageBase64.length}`);
+        try {
+          // Build contextual text from product id and folder name (e.g., "Bembella Black") plus display name
+          // m[2] contains the object path inside the bucket; take the first path segment as folder
+          const folderName = (m[2] || '').split('/')[0] || '';
+          const contextualText = `${r.product_id} ${folderName} ${r.display_name || ''}`.trim();
+          embedding = await callVertexPredict({ imageBytes: imageBase64, contextualText }, model, project, location);
+          // Normalize embedding (L2) before storing
+          if (Array.isArray(embedding)) {
+            embedding = l2normalize(embedding);
+          }
+        } catch (err) {
+          console.error('Vertex call failed for', r.image_uri, err.message || err);
+        }
+      }
+
+      if (!embedding) {
+        // fallback: small handcrafted vector from image bytes (NOT a real embedding)
+        embedding = avgColorFromBuffer(buf);
+      }
+
+      out.push({ filename: r.image_uri, productId: r.product_id, embedding });
+      console.log('Processed', r.image_uri);
+    } catch (err) {
+      console.error('Failed processing', r.image_uri, err.message || err);
+    }
+  }
+
+  const outPath = path.join(process.cwd(), 'data', 'training_embeddings.json');
+  fs.writeFileSync(outPath, JSON.stringify(out, null, 2), 'utf8');
+  console.log('Wrote', outPath);
+}
+
+if (require.main === module) main().catch((e) => { console.error(e); process.exit(1); });

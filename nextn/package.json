@@ -46,14 +46,19 @@
     "tailwindcss-animate": "^1.0.7",
     "zod": "^3.24.2"
     ,
-    "sharp": "^0.32.1"
+  "sharp": "^0.32.1",
+  "@google-cloud/storage": "^6.11.0",
+  "minimist": "^1.2.8"
   },
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "generate:phashes": "node ./scripts/generate_phashes.js"
+    "generate:phashes": "node ./scripts/generate_phashes.js",
+    "gcp:upload": "node ./scripts/gcp_upload_images.js",
+    "gcp:generate-embeddings": "node ./scripts/gcp_generate_embeddings_vertex.js",
+    "test:embeddings": "node ./scripts/test_local_embeddings_harness.js"
   },
   "devDependencies": {
     "babel-plugin-react-compiler": "1.0.0",
