@@ -30,9 +30,22 @@ async function readCsv(file) {
     const parts = l.split(',');
     const image_uri = parts[0].replace(/^"|"$/g, '');
     const product_id = parts[1];
-    return { image_uri, product_id };
+    const product_category = parts[2] || '';
+    const display_name = (parts[3] || '').replace(/^"|"$/g, '');
+    return { image_uri, product_id, product_category, display_name };
   });
   return rows;
+}
+
+function l2normalize(vec) {
+  if (!Array.isArray(vec) || vec.length === 0) return vec;
+  let sum = 0;
+  for (let i = 0; i < vec.length; i++) {
+    const v = Number(vec[i]) || 0;
+    sum += v * v;
+  }
+  const norm = Math.sqrt(sum) || 1;
+  return vec.map((x) => (Number(x) || 0) / norm);
 }
 
 function avgColorFromBuffer(buf) {
@@ -51,87 +64,68 @@ function avgColorFromBuffer(buf) {
 
 // payloadImage can be either { imageBytes: '<base64>' } or { imageUri: 'gs://...' }
 async function callVertexPredict(payloadImage, modelName, project, location) {
-  // Minimal example using REST Predict API. The exact request shape depends on model.
-  // This function expects MODEL_NAME like 'projects/PROJECT/locations/us-central1/publishers/google/models/clip-vit-base-patch32'
-  // You may need to adjust payload for the chosen model.
-  const url = `https://${location}-aiplatform.googleapis.com/v1/${modelName}:predict`;
+  // Simplified: send a single, production-proven payload and return or throw.
+  // Defensive check: if modelName is a boolean true/false (PowerShell can pass booleans
+  // when env vars are interpolated), reject early with a clear message.
+  if (modelName === true || modelName === false || String(modelName).toLowerCase() === 'true' || String(modelName).toLowerCase() === 'false') {
+    throw new Error(`callVertexPredict: invalid modelName value (${String(modelName)}). Pass the full Vertex model resource path (projects/PROJECT/locations/..../models/...) via --model or VERTEX_MODEL_NAME`);
+  }
+
+  // Resolve effective model name: prefer explicit argument, then env var.
+  let effectiveModel = String(modelName || process.env.VERTEX_MODEL_NAME || '').trim();
+  if (!effectiveModel) {
+    throw new Error('Vertex model name not provided. Set --model or VERTEX_MODEL_NAME to the full model resource path (e.g. projects/PROJECT/locations/us-central1/publishers/google/models/...)');
+  }
+  const url = `https://${location}-aiplatform.googleapis.com/v1/${effectiveModel}:predict`;
+  console.debug('Using Vertex model:', effectiveModel);
   const token = await getAccessToken();
-  // Build candidate bodies based on payloadImage
-  const candidateBodies = [];
 
-  // Prefer sending Base64 image bytes (imageBytes) as this model requires bytes.
-  // Use the FLAT structure first (imageBytes directly in the instance) because
-  // this environment's model requires that shape. Keep the nested shape as a
-  // secondary attempt.
-  if (payloadImage && payloadImage.imageBytes) {
-    // 0: FLAT payload (preferred)
-    candidateBodies.push({ instances: [ { imageBytes: payloadImage.imageBytes } ], parameters: {} });
-    // 1: nested payload (alternative) - try alternative key used by some Vertex integrations
-    candidateBodies.push({ 
-      instances: [ { image: { bytesBase64Encoded: payloadImage.imageBytes } } ],
-      parameters: {} 
-    });
+  if (!payloadImage || !payloadImage.imageBytes) {
+    throw new Error('callVertexPredict: payloadImage.imageBytes is required');
   }
 
-  // keep imageUri as a lower-priority fallback (if provided)
-  if (payloadImage && payloadImage.imageUri) {
-    candidateBodies.push({ instances: [ { image: { imageUri: payloadImage.imageUri } } ], parameters: {} });
-    candidateBodies.push({ instances: [ { imageUri: payloadImage.imageUri } ], parameters: {} });
+  // Build single payload; allow optional contextual text alongside the image
+  const instance = { image: { bytesBase64Encoded: payloadImage.imageBytes } };
+  if (payloadImage.contextualText) {
+    instance.contextual_text = String(payloadImage.contextualText);
   }
 
-  if (candidateBodies.length === 0) {
-    throw new Error('No imageBytes or imageUri provided for Vertex predict');
+  const requestBody = JSON.stringify({ instances: [instance], parameters: {} });
+
+  // Log the request size (do not print full Base64)
+  try {
+    console.debug('Vertex predict URL:', url);
+    console.debug('Vertex request body length:', requestBody.length);
+  } catch (e) {
+    // ignore
   }
 
-  console.debug('Vertex predict URL:', url);
-  let lastErrorText = null;
-  for (let i = 0; i < candidateBodies.length; i++) {
-    const body = candidateBodies[i];
-    try {
-      // Log the exact payload we are sending for easier debugging (truncate long base64)
-      try {
-        const s = JSON.stringify(body);
-        console.debug('Vertex payload (first 1k chars):', s.slice(0, 1000));
-        if (s.length > 1000) console.debug('Vertex payload length:', s.length);
-      } catch (e) {
-        // ignore stringify errors
-      }
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify(body)
-      });
-      const txt = await res.text();
-      if (!res.ok) {
-        // Save last error and continue to next candidate
-        lastErrorText = `status=${res.status} body=${txt}`;
-        console.warn(`Vertex payload attempt ${i} failed:`, lastErrorText);
-        continue;
-      }
-      const json = JSON.parse(txt || '{}');
-      // attempt to extract embedding vector (model dependent)
-      if (json.predictions && json.predictions[0]) {
-        const pred = json.predictions[0];
-        if (Array.isArray(pred)) return pred;
-        if (pred.embedding) return pred.embedding;
-      }
-      // Some models return `outputs` or `outputs[0].embedding`
-      if (json.outputs && Array.isArray(json.outputs) && json.outputs[0]) {
-        const out = json.outputs[0];
-        if (Array.isArray(out)) return out;
-        if (out.embedding) return out.embedding;
-      }
-      // Nothing useful found but request succeeded — return full predictions if present
-      if (json.predictions) return json.predictions[0];
-      return json;
-    } catch (err) {
-      lastErrorText = String(err);
-      console.warn('Vertex payload attempt error:', lastErrorText);
-      continue;
-    }
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: requestBody
+  });
+
+  const txt = await res.text();
+  if (!res.ok) {
+    throw new Error('Vertex predict failed: ' + res.status + ' ' + txt);
   }
-  // All attempts failed
-  throw new Error('Vertex predict failed (all payload attempts): ' + (lastErrorText || 'no response'));
+  const json = JSON.parse(txt || '{}');
+  // CRITICAL FIX: only accept a numeric array returned in predictions[0].imageEmbedding
+  // and nothing else. If Vertex doesn't return that array, fail fast so we don't
+  // persist malformed/full-response objects as embeddings (which produced the
+  // previous giant-dimension bug).
+  if (json.predictions && Array.isArray(json.predictions[0]?.imageEmbedding)) {
+    return json.predictions[0].imageEmbedding;
+  }
+  // If we don't find the expected array, throw so caller can handle/fallback and
+  // we avoid saving incorrect data into training_embeddings.json
+  throw new Error('Vertex did not return a valid imageEmbedding array.');
+}
+
+// Provide a camel-cased alias as requested: l2Normalize
+function l2Normalize(vec) {
+  return l2normalize(vec);
 }
 
 async function getAccessToken() {
@@ -219,7 +213,15 @@ async function main() {
         const imageBase64 = buf.toString('base64');
         console.log('Calling Vertex (imageBytes) for', r.image_uri, `bytes=${buf.length} base64Len=${imageBase64.length}`);
         try {
-          embedding = await callVertexPredict({ imageBytes: imageBase64 }, model, project, location);
+          // Build contextual text from product id and folder name (e.g., "Bembella Black") plus display name
+          // m[2] contains the object path inside the bucket; take the first path segment as folder
+          const folderName = (m[2] || '').split('/')[0] || '';
+          const contextualText = `${r.product_id} ${folderName} ${r.display_name || ''}`.trim();
+          embedding = await callVertexPredict({ imageBytes: imageBase64, contextualText }, model, project, location);
+          // Normalize embedding (L2) before storing
+          if (Array.isArray(embedding)) {
+            embedding = l2normalize(embedding);
+          }
         } catch (err) {
           console.error('Vertex call failed for', r.image_uri, err.message || err);
         }

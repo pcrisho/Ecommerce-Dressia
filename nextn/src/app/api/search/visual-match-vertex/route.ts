@@ -11,14 +11,34 @@ import type { GoogleAuth as GoogleAuthType } from 'google-auth-library';
 const GCP_PROJECT_ID = process.env.GCP_PROJECT_ID || process.env.GOOGLE_CLOUD_PROJECT || '';
 
 function cosine(a: number[], b: number[]) {
+  // Defensive: require equal-length vectors. If lengths differ, return 0 similarity
+  // to avoid comparing only prefixes (which produced inconsistent scores).
+  if (!Array.isArray(a) || !Array.isArray(b)) return 0;
+  if (a.length !== b.length) return 0;
   let dot = 0, na = 0, nb = 0;
-  for (let i = 0; i < Math.min(a.length, b.length); i++) {
+  for (let i = 0; i < a.length; i++) {
     dot += a[i] * b[i];
     na += a[i] * a[i];
     nb += b[i] * b[i];
   }
   if (na === 0 || nb === 0) return 0;
   return dot / (Math.sqrt(na) * Math.sqrt(nb));
+}
+
+function l2normalize(vec: number[]) {
+  if (!Array.isArray(vec) || vec.length === 0) return vec;
+  let sum = 0;
+  for (let i = 0; i < vec.length; i++) {
+    const v = Number(vec[i]) || 0;
+    sum += v * v;
+  }
+  const norm = Math.sqrt(sum) || 1;
+  return vec.map((x) => (Number(x) || 0) / norm);
+}
+
+// Camel-cased alias used elsewhere in the codebase/tests: ensure l2Normalize exists
+function l2Normalize(vec: number[]) {
+  return l2normalize(vec);
 }
 
 async function computeEmbeddingWithVertex(buffer: Buffer) {
@@ -46,6 +66,10 @@ async function computeEmbeddingWithVertex(buffer: Buffer) {
     auth = new GoogleAuth({ scopes: ['https://www.googleapis.com/auth/cloud-platform'] });
   }
   console.debug('computeEmbeddingWithVertex: project=', GCP_PROJECT_ID || '(not set)', 'model=', model);
+
+
+  
+
   const client = await auth.getClient();
   const tokenRes = await client.getAccessToken();
   const token = tokenRes?.token;
@@ -54,10 +78,20 @@ async function computeEmbeddingWithVertex(buffer: Buffer) {
   // Construct the REST predict URL using the configured model resource name.
   // model is expected to be a full resource path, e.g. projects/PROJECT/locations/us-central1/publishers/google/models/...
   const url = `https://${location}-aiplatform.googleapis.com/v1/${model}:predict`;
+  const requestBodyObj = { instances: [{ image: { bytesBase64Encoded: base64 } }], parameters: {} };
+  const requestBody = JSON.stringify(requestBodyObj);
+  // Log a truncated preview of the payload (first 1k chars) and its length for verification — avoid printing full Base64.
+  try {
+    const preview = requestBody.slice(0, 1000);
+    console.debug('Vertex payload preview (first 1k chars):', preview);
+    console.debug('Vertex payload length:', requestBody.length);
+  } catch (e) {
+    // best-effort logging; don't fail the request if logging fails
+  }
   const res = await fetch(url, {
     method: 'POST',
     headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ instances: [{ content: base64 }], parameters: {} })
+    body: requestBody
   });
   if (!res.ok) {
     const t = await res.text();
@@ -67,6 +101,8 @@ async function computeEmbeddingWithVertex(buffer: Buffer) {
   if (json.predictions && json.predictions[0]) {
     const pred = json.predictions[0];
     if (Array.isArray(pred)) return pred;
+    // Some Vertex publisher models return the vector under `imageEmbedding`.
+    if (pred.imageEmbedding && Array.isArray(pred.imageEmbedding)) return pred.imageEmbedding as number[];
     if (pred.embedding) return pred.embedding;
   }
   throw new Error('Unexpected Vertex response shape');
@@ -118,6 +154,7 @@ export async function POST(req: NextRequest) {
         vertexAttempted = true;
         try {
           queryEmbedding = await computeEmbeddingWithVertex(fileBuffer!);
+          if (Array.isArray(queryEmbedding)) queryEmbedding = l2Normalize(queryEmbedding as number[]);
           usedVertex = true;
         } catch (err) {
           vertexError = String(err);
@@ -131,6 +168,7 @@ export async function POST(req: NextRequest) {
         vertexAttempted = true;
         try {
           queryEmbedding = await computeEmbeddingWithVertex(fileBuffer!);
+      if (Array.isArray(queryEmbedding)) queryEmbedding = l2Normalize(queryEmbedding as number[]);
           usedVertex = true;
         } catch (err) {
           vertexError = String(err);
@@ -145,7 +183,29 @@ export async function POST(req: NextRequest) {
 
   const indexRaw = hasLocalIndex ? fs.readFileSync(embeddingsPath, 'utf8') : '[]';
   type IndexEntry = { filename: string; productId?: string; embedding: number[]; score?: number };
-  const index = JSON.parse(indexRaw) as IndexEntry[];
+  // Parse index and defensively normalize embedding shapes so scoring always sees a flat number[]
+  const rawIndex = JSON.parse(indexRaw) as Array<Record<string, any>>;
+
+  function flattenEmbedding(e: any): number[] | null {
+    if (!e) return null;
+    if (Array.isArray(e)) return e.map((v) => Number(v));
+    if (typeof e === 'object') {
+  if (Array.isArray(e.imageEmbedding)) return e.imageEmbedding.map((v: any) => Number(v));
+  if (Array.isArray(e.embedding)) return e.embedding.map((v: any) => Number(v));
+  if (Array.isArray(e.vector)) return e.vector.map((v: any) => Number(v));
+      // return the first array-valued property we find
+      for (const k of Object.keys(e)) {
+        if (Array.isArray(e[k])) return e[k].map((v) => Number(v));
+      }
+    }
+    return null;
+  }
+
+  const index = rawIndex.map((r) => {
+    const emb = flattenEmbedding(r.embedding || r);
+    const normalized = Array.isArray(emb) && emb.length ? l2Normalize(emb) : [];
+    return { filename: String(r.filename || r.file || ''), productId: r.productId ? String(r.productId) : undefined, embedding: normalized } as IndexEntry;
+  });
 
     if (!queryEmbedding) {
       // If we don't have Vertex, try to compute a simple fallback from bytes (not ideal)
@@ -160,12 +220,20 @@ export async function POST(req: NextRequest) {
         c++;
       }
       v.push(Math.round(r / c)); v.push(Math.round(g / c)); v.push(Math.round(b / c));
-      queryEmbedding = v;
+  queryEmbedding = v;
+  if (Array.isArray(queryEmbedding)) queryEmbedding = l2normalize(queryEmbedding as number[]);
     }
 
-    // Brute-force cosine search
-    const scored = index.map((e) => ({ ...e, score: cosine(queryEmbedding as number[], e.embedding) }));
-    const top = scored.sort((a, b) => (b.score ?? 0) - (a.score ?? 0)).slice(0, 10);
+  // Brute-force cosine search
+  const scored = index.map((e) => ({ ...e, score: cosine(queryEmbedding as number[], e.embedding) }));
+  const sorted = scored.sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+
+  // Apply a minimum similarity threshold. Use a stricter threshold when Vertex produced the query
+  // embedding, but allow a lower threshold for fallback heuristics so the API doesn't always return empty.
+  const STRICT_THRESHOLD = Number(process.env.IMAGE_MATCH_SIMILARITY_THRESHOLD || '0.6');
+  const FALLBACK_THRESHOLD = Number(process.env.IMAGE_MATCH_FALLBACK_SIMILARITY_THRESHOLD || '0.25');
+  const effectiveThreshold = usedVertex ? STRICT_THRESHOLD : FALLBACK_THRESHOLD;
+  const top = sorted.filter((s) => (s.score ?? 0) >= effectiveThreshold).slice(0, 10);
 
     // Map to products in local catalog if possible
     const dataFile = path.join(process.cwd(), 'src', 'lib', 'data.ts');
@@ -173,7 +241,8 @@ export async function POST(req: NextRequest) {
 
   const results = top.map((t) => ({ filename: t.filename, productId: t.productId, score: t.score }));
   const source = usedVertex ? 'vertex' : 'fallback';
-  const resp: { results: { filename: string; productId?: string; score?: number }[]; source: string; vertexAttempted: boolean; vertexError?: string } = { results, source, vertexAttempted };
+  const topScore = sorted.length ? (sorted[0].score ?? 0) : 0;
+  const resp: { results: { filename: string; productId?: string; score?: number }[]; source: string; vertexAttempted: boolean; usedVertex: boolean; topScore: number; vertexError?: string } = { results, source, vertexAttempted, usedVertex, topScore };
   if (vertexError) resp.vertexError = vertexError;
 
   return NextResponse.json(resp);

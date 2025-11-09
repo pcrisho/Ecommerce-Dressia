@@ -20,7 +20,8 @@ export default function Home() {
   const [imageSearchResults, setImageSearchResults] = useState<Dress[]>([]);
   const [imageSearchUnmatched, setImageSearchUnmatched] = useState<Array<{ filename: string; score: number }>>([]);
   const [aiMessage, setAiMessage] = useState<string | null>(null);
-  const [preferVertex, setPreferVertex] = useState(false);
+  // Default to using Vertex for embeddings unless the user unchecks the box
+  const [preferVertex, setPreferVertex] = useState(true);
   const fileInputRef = useRef<HTMLInputElement>(null);
   // Modal state for product details
   const [selectedDress, setSelectedDress] = useState<Dress | null>(null);
@@ -77,7 +78,14 @@ export default function Home() {
         return { product, filename: o.filename, score: o.score } as Mapped;
       });
 
-      const products: Dress[] = mapped.filter((m: Mapped) => m.product).map((m: Mapped) => m.product as Dress);
+      // Deduplicate products by id to avoid rendering items with duplicate React keys
+      const productsMap = new Map<string, Dress>();
+      mapped.forEach((m: Mapped) => {
+        if (m.product) {
+          productsMap.set((m.product as Dress).id, m.product as Dress);
+        }
+      });
+      const products: Dress[] = Array.from(productsMap.values());
       const unmatched = mapped.filter((m: Mapped) => !m.product).map((m: Mapped) => ({ filename: m.filename || '', score: m.score || 0 }));
 
       // Show source if present
