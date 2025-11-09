@@ -261,8 +261,8 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // Convert to array and sort by distance, limit to 10 unique products
-    const unique = Array.from(byProduct.values()).sort((a, b) => a.distance - b.distance).slice(0, 10);
+  // Convert to array and sort by distance, limit to 3 unique products (top-3 results only)
+  const unique = Array.from(byProduct.values()).sort((a, b) => a.distance - b.distance).slice(0, 3);
 
     // Map to products when possible
     const mapped = unique.map((r) => {
