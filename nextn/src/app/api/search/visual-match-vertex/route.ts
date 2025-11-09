@@ -5,7 +5,7 @@ import path from 'path';
 
 export const runtime = 'nodejs';
 
-import type { GoogleAuth as GoogleAuthType } from 'google-auth-library';
+import { GoogleAuth, ExternalAccountClient, type GoogleAuth as GoogleAuthType } from 'google-auth-library';
 
 // Prefer explicit project id from env (set this in Vercel):
 const GCP_PROJECT_ID = process.env.GCP_PROJECT_ID || process.env.GOOGLE_CLOUD_PROJECT || '';
@@ -50,27 +50,46 @@ async function computeEmbeddingWithVertex(buffer: Buffer) {
   const location = process.env.VERTEX_LOCATION || 'us-central1';
   if (!model) throw new Error('VERTEX_MODEL_NAME not configured');
 
-  // Use google-auth-library to obtain an access token. If GCP_SERVICE_ACCOUNT_KEY is provided
-  // (e.g. stored as a Vercel Environment Variable) parse and use it; otherwise fall back to ADC.
-  const { GoogleAuth } = await import('google-auth-library');
-  let auth: GoogleAuthType;
-  if (process.env.GCP_SERVICE_ACCOUNT_KEY) {
+  // Use google-auth-library to obtain an access token. Prefer an explicit ExternalAccountClient
+  // (WIF) when GOOGLE_WORKLOAD_IDENTITY_PROVIDER and GOOGLE_SERVICE_ACCOUNT_EMAIL are present,
+  // otherwise fall back to Application Default Credentials (ADC).
+  let auth: GoogleAuthType | undefined;
+  let usedExplicitWif = false;
+  let externalClient: any = null;
+
+  // PRIORIDAD 1: Forzar el uso de ExternalAccountClient (WIF) si las variables estándar están presentes
+  if (process.env.GOOGLE_WORKLOAD_IDENTITY_PROVIDER && process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL) {
     try {
-      const creds = JSON.parse(process.env.GCP_SERVICE_ACCOUNT_KEY);
-      auth = new GoogleAuth({ credentials: creds, scopes: ['https://www.googleapis.com/auth/cloud-platform'] });
+      externalClient = new (ExternalAccountClient as any)({
+        // The provider/audience is provided via GOOGLE_WORKLOAD_IDENTITY_PROVIDER
+        targetAudience: process.env.GOOGLE_WORKLOAD_IDENTITY_PROVIDER,
+        serviceAccountEmail: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
+        // scopes needed to access GCP APIs
+        scopes: ['https://www.googleapis.com/auth/cloud-platform'],
+      });
+      usedExplicitWif = true;
     } catch (e) {
-      console.warn('GCP_SERVICE_ACCOUNT_KEY is present but could not be parsed as JSON; falling back to ADC');
-      auth = new GoogleAuth({ scopes: ['https://www.googleapis.com/auth/cloud-platform'] });
+      console.warn('Explicit ExternalAccountClient (WIF) failed, falling back to ADC:', String(e));
     }
-  } else {
+  }
+
+  // PRIORIDAD 2: Fallback a ADC si WIF falló
+  if (!usedExplicitWif) {
     auth = new GoogleAuth({ scopes: ['https://www.googleapis.com/auth/cloud-platform'] });
   }
-  console.debug('computeEmbeddingWithVertex: project=', GCP_PROJECT_ID || '(not set)', 'model=', model);
+  console.debug('computeEmbeddingWithVertex: project=', GCP_PROJECT_ID || '(not set)', 'model=', model, 'usedExplicitWif=', usedExplicitWif);
 
 
   
 
-  const client = await auth.getClient();
+  let client: any;
+  if (externalClient) {
+    client = externalClient;
+  } else if (auth) {
+    client = await auth.getClient();
+  } else {
+    throw new Error('No authentication client available to call Vertex');
+  }
   const tokenRes = await client.getAccessToken();
   const token = tokenRes?.token;
 
