@@ -91,14 +91,82 @@ async function computeAHashFromBuffer(buffer: Buffer): Promise<string> {
   return hex;
 }
 
-// Compute average color hex from buffer (RGB) using 1x1 resize
+// Compute dominant color hex from buffer, focusing on the central area of the image
 async function computeAvgColorHex(buffer: Buffer): Promise<string> {
-  const SIZE = 1;
-  const raw = await sharp(buffer).resize(SIZE, SIZE, { fit: 'fill' }).raw().toBuffer();
-  const r = raw[0];
-  const g = raw[1];
-  const b = raw[2];
-  const hex = ((r << 16) | (g << 8) | b).toString(16).padStart(6, '0');
+  const SIZE = 64; // Alta resolución para mejor muestreo
+  const CENTRAL_AREA_RATIO = 0.6; // Solo considerar el 60% central de la imagen
+  
+  const raw = await sharp(buffer)
+    .resize(SIZE, SIZE, { fit: 'contain' })
+    .removeAlpha()
+    .raw()
+    .toBuffer();
+
+  // Calcular los límites del área central
+  const startX = Math.floor(SIZE * ((1 - CENTRAL_AREA_RATIO) / 2));
+  const endX = Math.floor(SIZE * (1 - (1 - CENTRAL_AREA_RATIO) / 2));
+  const startY = Math.floor(SIZE * ((1 - CENTRAL_AREA_RATIO) / 2));
+  const endY = Math.floor(SIZE * (1 - (1 - CENTRAL_AREA_RATIO) / 2));
+
+  // Estructura para agrupar colores similares
+  const colors: Array<{r: number, g: number, b: number, count: number}> = [];
+  const BACKGROUND_THRESHOLD = 245;
+  const COLOR_SIMILARITY_THRESHOLD = 15; // Qué tan similares deben ser los colores para agruparlos
+
+  // Analizar solo el área central
+  for (let y = startY; y < endY; y++) {
+    for (let x = startX; x < endX; x++) {
+      const i = (y * SIZE + x) * 3;
+      const r = raw[i];
+      const g = raw[i + 1];
+      const b = raw[i + 2];
+      
+      // Ignorar píxeles muy claros (probablemente fondo)
+      if (r > BACKGROUND_THRESHOLD && g > BACKGROUND_THRESHOLD && b > BACKGROUND_THRESHOLD) {
+        continue;
+      }
+
+      // Calcular la distancia al centro para dar más peso a los píxeles centrales
+      const centerX = SIZE / 2;
+      const centerY = SIZE / 2;
+      const distanceToCenter = Math.sqrt(Math.pow(x - centerX, 2) + Math.pow(y - centerY, 2));
+      const weight = 1 - (distanceToCenter / (SIZE / 2));
+
+      // Agrupar colores similares con peso
+      const foundIndex = colors.findIndex(c => 
+        Math.abs(c.r - r) < COLOR_SIMILARITY_THRESHOLD && 
+        Math.abs(c.g - g) < COLOR_SIMILARITY_THRESHOLD && 
+        Math.abs(c.b - b) < COLOR_SIMILARITY_THRESHOLD
+      );
+
+      if (foundIndex >= 0) {
+        const existing = colors[foundIndex];
+        const totalWeight = existing.count + weight;
+        existing.r = (existing.r * existing.count + r * weight) / totalWeight;
+        existing.g = (existing.g * existing.count + g * weight) / totalWeight;
+        existing.b = (existing.b * existing.count + b * weight) / totalWeight;
+        existing.count = totalWeight;
+      } else {
+        colors.push({ r, g, b, count: weight });
+      }
+    }
+  }
+
+  if (colors.length === 0) {
+    return "ffffff";
+  }
+
+  // Encontrar el grupo de color más significativo
+  const dominantColor = colors.reduce((prev, curr) => 
+    curr.count > prev.count ? curr : prev
+  );
+
+  const hex = (
+    (Math.round(dominantColor.r) << 16) | 
+    (Math.round(dominantColor.g) << 8) | 
+    Math.round(dominantColor.b)
+  ).toString(16).padStart(6, '0');
+
   return hex;
 }
 
@@ -224,7 +292,52 @@ export async function POST(req: NextRequest) {
           // big penalty to push this candidate out of threshold
           combined += 100;
         }
-        return { ...entry, distance: combined, rawDistanceP: dp, rawDistanceA: da, rawColorDist: Math.round(colorDist), rawHueDiff: Math.round(hueDiff), rawSaturationQ: Math.round(hslQ.s), rawSaturationE: Math.round(hslE.s) };
+
+                // Función auxiliar para detectar negro/blanco considerando múltiples factores
+        function detectBWColor(hsl: { h: number, s: number, l: number }, rgb: { r: number, g: number, b: number }) {
+          const rgbAvg = (rgb.r + rgb.g + rgb.b) / 3;
+          const rgbDiff = Math.max(Math.abs(rgb.r - rgbAvg), Math.abs(rgb.g - rgbAvg), Math.abs(rgb.b - rgbAvg));
+
+            // Para negro (criterios más flexibles):
+            const isBlack = (
+              // Criterio principal: muy oscuro en general
+              (hsl.l < 30 && rgbAvg < 70) ||
+              // Criterio secundario: extremadamente oscuro
+              (rgbAvg < 30 && rgbDiff < 30)
+            );
+          
+            // Para blanco (criterios más flexibles):
+            const isWhite = (
+              // Criterio principal: muy claro en general
+              (hsl.l > 70 && rgbAvg > 180) ||
+              // Criterio secundario: extremadamente claro
+              (rgbAvg > 220 && rgbDiff < 30)
+            );
+          
+          return { isBlack, isWhite };
+        }
+
+        // Determinar estado negro/blanco usando la nueva función
+        const entryBW = detectBWColor(hslE, rgbE);
+        const queryBW = detectBWColor({ h: hslQ.h, s: hslQ.s, l: hslQ.l }, rgbQ);
+        
+        const isEntryBlack = entryBW.isBlack;
+        const isEntryWhite = entryBW.isWhite;
+        
+        // Penalización extrema si intentamos mezclar negro con blanco
+        if ((isEntryBlack && queryBW.isWhite) || (isEntryWhite && queryBW.isBlack)) {
+          combined += 1000; // Penalización extrema para garantizar que no se mezclen
+        }
+        
+        // Penalización adicional si uno es BW y el otro no
+        if ((isEntryBlack || isEntryWhite) && !queryBW.isBlack && !queryBW.isWhite) {
+          combined += 500;
+        }
+        if ((queryBW.isBlack || queryBW.isWhite) && !isEntryBlack && !isEntryWhite) {
+          combined += 500;
+        }
+
+        return { ...entry, distance: combined, rawDistanceP: dp, rawDistanceA: da, rawColorDist: Math.round(colorDist), rawHueDiff: Math.round(hueDiff), rawSaturationQ: Math.round(hslQ.s), rawSaturationE: Math.round(hslE.s), rawLightQ: Math.round(hslQ.l), rawLightE: Math.round(hslE.l), isEntryBlack, isEntryWhite };
       } catch (e) {
         return { ...entry, distance: combined, rawDistanceP: dp, rawDistanceA: da, rawColorDist: Math.round(colorDist) };
       }
@@ -237,16 +350,61 @@ export async function POST(req: NextRequest) {
     //    * pHash very similar (dp <= PHASH_STRICT)
     //    * aHash very similar (da <= AHASH_STRICT)
     //    * query is saturated (likely colored garment) AND color distance small
-    const PHASH_STRICT = 20;
-    const AHASH_STRICT = 20;
-    const COLOR_DIST_ACCEPT = 110; // perceptual HSL-based distance threshold
-    const QUERY_SAT_MIN = 30; // require query to be reasonably saturated to trust color
+  const PHASH_STRICT = 24; // permitir un poco más de tolerancia en hashes
+  const AHASH_STRICT = 24;
+  const COLOR_DIST_ACCEPT = 160; // umbral más permisivo para color
+  const QUERY_SAT_MIN = 20; // menos dependencia del umbral de saturación
+
+    // Detectar si la query es negro o blanco usando los mismos criterios que antes
+    const queryRgbAvg = (queryRgb.r + queryRgb.g + queryRgb.b) / 3;
+    const queryRgbDiff = Math.max(
+      Math.abs(queryRgb.r - queryRgbAvg),
+      Math.abs(queryRgb.g - queryRgbAvg),
+      Math.abs(queryRgb.b - queryRgbAvg)
+    );
+
+    const isQueryBlack = queryHsl.l < 25 && queryHsl.s < 20 && queryRgbAvg < 50 && queryRgbDiff < 20;
+    const isQueryWhite = queryHsl.l > 75 && queryHsl.s < 20 && queryRgbAvg > 200 && queryRgbDiff < 20;
+
+    console.log('Query color analysis:', {
+      rgb: queryRgb,
+      hsl: queryHsl,
+      rgbAvg: queryRgbAvg,
+      rgbDiff: queryRgbDiff,
+      isBlack: isQueryBlack,
+      isWhite: isQueryWhite
+    });
 
     const filtered = scored.filter((s) => {
       if (s.distance > threshold) return false;
-      const passHash = (typeof s.rawDistanceP === 'number' && s.rawDistanceP <= PHASH_STRICT) || (typeof s.rawDistanceA === 'number' && s.rawDistanceA <= AHASH_STRICT);
-      const passColor = queryHsl.s > QUERY_SAT_MIN && typeof s.rawColorDist === 'number' && s.rawColorDist <= COLOR_DIST_ACCEPT;
-      return passHash || passColor;
+
+      // Lógica estricta mejorada para negro/blanco:
+      if (isQueryBlack) {
+        // Si la búsqueda es negra, SOLO mostrar prendas negras
+        if (!(s as any).isEntryBlack) {
+          console.log('Filtered out non-black result for black query:', s.filename);
+          return false;
+        }
+      } else if (isQueryWhite) {
+        // Si la búsqueda es blanca, SOLO mostrar prendas blancas
+        if (!(s as any).isEntryWhite) {
+          console.log('Filtered out non-white result for white query:', s.filename);
+          return false;
+        }
+      } else {
+        // Si la búsqueda no es ni negra ni blanca, NO mostrar prendas negras ni blancas
+        if ((s as any).isEntryBlack || (s as any).isEntryWhite) {
+          console.log('Filtered out B/W result for colored query:', s.filename);
+          return false;
+        }
+      }
+
+    // Accept color match regardless of query saturation (some garments are patterned/low-sat)
+    const passHash = (typeof s.rawDistanceP === 'number' && s.rawDistanceP <= PHASH_STRICT) || (typeof s.rawDistanceA === 'number' && s.rawDistanceA <= AHASH_STRICT);
+    const passColor = typeof s.rawColorDist === 'number' && s.rawColorDist <= COLOR_DIST_ACCEPT;
+
+    // If neither hash nor color passes, reject
+    return passHash || passColor;
     });
 
     // Deduplicate by product key (prefer productId; fallback to filename base)

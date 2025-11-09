@@ -202,8 +202,20 @@ function walkDir(dir) {
       let productId = null;
       if (folder && products.length) {
         const lowFolder = folder.toLowerCase();
-        const found = products.find((prd) => prd.nombre.toLowerCase().includes(lowFolder));
-        if (found) productId = found.id;
+        // Special handling for Bembella variants
+        if (lowFolder.includes('bembella')) {
+          if (lowFolder.includes('white')) {
+            productId = '1';  // Bembella White
+          } else if (lowFolder.includes('black')) {
+            productId = '2';  // Bembella Black
+          } else if (lowFolder.includes('red')) {
+            productId = '6';  // Bembella Red
+          }
+        } else {
+          // For other products, use substring matching
+          const found = products.find((prd) => prd.nombre.toLowerCase().includes(lowFolder));
+          if (found) productId = found.id;
+        }
       }
 
   out.push({ filename: rel, phash, ahash, color: avg.hex, productId });

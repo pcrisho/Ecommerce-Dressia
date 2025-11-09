@@ -67,7 +67,9 @@ function colorDist(a,b){ const hslA=rgbToHsl(a.r,a.g,a.b), hslB=rgbToHsl(b.r,b.g
       if ((strictCheck && bothSat && hueDiff > strictHueThreshold) || (!strictCheck && bothSat && hueDiff > 45)) {
         combined += 100;
       }
-      return { filename: entry.filename, phash: entry.phash, productId: entry.productId, dp, da, colorD: Math.round(colorD), colorNorm, hueDiff: Math.round(hueDiff), satQ: Math.round(hslQ.s), satE: Math.round(hslE.s), combined };
+      const isEntryBlack = hslE.l < 18;
+      const isEntryWhite = hslE.l > 82;
+      return { filename: entry.filename, phash: entry.phash, productId: entry.productId, dp, da, colorD: Math.round(colorD), colorNorm, hueDiff: Math.round(hueDiff), satQ: Math.round(hslQ.s), satE: Math.round(hslE.s), lightQ: Math.round(hslQ.l), lightE: Math.round(hslE.l), isEntryBlack, isEntryWhite, combined };
     } catch (e) {
       return { filename: entry.filename, phash: entry.phash, productId: entry.productId, dp, da, colorD: Math.round(colorD), colorNorm, combined };
     }
@@ -77,12 +79,20 @@ function colorDist(a,b){ const hslA=rgbToHsl(a.r,a.g,a.b), hslB=rgbToHsl(b.r,b.g
     const AHASH_STRICT = 20;
     const COLOR_DIST_ACCEPT = 110;
     const QUERY_SAT_MIN = 30;
+    // compute q HSL and black/white flags
+    const qhsl = rgbToHsl(qcolor.dom.r, qcolor.dom.g, qcolor.dom.b);
+    const isQueryBlack = qhsl.l < 18;
+    const isQueryWhite = qhsl.l > 82;
+
     const filtered = scored.filter(s => {
       if (s.combined > (Number(process.env.SIM_THRESHOLD) || 24)) return false;
+      // BW gating
+      if (s.isEntryBlack && !isQueryBlack) return false;
+      if (s.isEntryWhite && !isQueryWhite) return false;
       const passHash = (typeof s.dp === 'number' && s.dp <= PHASH_STRICT) || (typeof s.da === 'number' && s.da <= AHASH_STRICT);
       const passColor = (qcolor && qcolor.dom && ( ( (Math.max(qcolor.dom.r,qcolor.dom.g,qcolor.dom.b) - Math.min(qcolor.dom.r,qcolor.dom.g,qcolor.dom.b) )/255*100) ) > QUERY_SAT_MIN) && (typeof s.colorD === 'number' && s.colorD <= COLOR_DIST_ACCEPT);
       return passHash || passColor;
-    }).sort((a,b)=>a.combined - b.combined).slice(0,20);
+    }).sort((a,b)=>a.combined - b.combined).slice(0,3);
   console.log('Top results:');
   console.table(filtered.map(f=> ({filename: f.filename, combined: f.combined, dp: f.dp, da: f.da, colorD: f.colorD, hueDiff: f.hueDiff ?? null, satQ: f.satQ ?? null, satE: f.satE ?? null}))); 
 })();
