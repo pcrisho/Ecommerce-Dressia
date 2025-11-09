@@ -183,6 +183,8 @@ export async function POST(req: NextRequest) {
     const queryPhash = await computePHashFromBuffer(fileBuffer!);
     const queryAhash = await computeAHashFromBuffer(fileBuffer!);
     const queryColorHex = await computeAvgColorHex(fileBuffer!);
+  const queryRgb = hexToRgb(queryColorHex);
+  const queryHsl = rgbToHsl(queryRgb.r, queryRgb.g, queryRgb.b);
 
     // Compare against dataset
     const threshold = Number(req.nextUrl.searchParams.get('threshold') ?? DEFAULT_THRESHOLD);
@@ -199,14 +201,53 @@ export async function POST(req: NextRequest) {
       const rgbQ = hexToRgb(queryColorHex);
       const rgbE = hexToRgb(entryColorHex);
       const colorDist = colorDistanceRgb(rgbQ, rgbE);
+
       // normalize color dist to 0..VECTOR_BITS (so scales are similar to hamming on 64-bit)
       const colorNorm = Math.round((colorDist / maxColorDist) * VECTOR_BITS);
-      const combined = Math.round(dp * weightP + da * weightA + colorNorm * weightC);
-      return { ...entry, distance: combined, rawDistanceP: dp, rawDistanceA: da, rawColorDist: Math.round(colorDist) };
+      let combined = Math.round(dp * weightP + da * weightA + colorNorm * weightC);
+
+      // Additional hue-based gating: when both colors are saturated, large hue differences
+      // usually mean different garments (e.g., red vs black/white). Penalize heavily to
+      // avoid returning structurally-similar but color-mismatched items.
+      try {
+        const hslQ = rgbToHsl(rgbQ.r, rgbQ.g, rgbQ.b);
+        const hslE = rgbToHsl(rgbE.r, rgbE.g, rgbE.b);
+        const hueDiff = Math.min(Math.abs(hslQ.h - hslE.h), 360 - Math.abs(hslQ.h - hslE.h));
+        // If the query is strongly saturated (a clear color like red), be stricter
+        // about acceptable hue differences. This avoids returning similar-structure
+        // items with a clearly different dominant color.
+        const strictSaturationThreshold = 45; // query must be fairly saturated
+        const strictHueThreshold = 30; // degrees
+        const bothSaturated = hslQ.s > 25 && hslE.s > 25;
+        const strictCheck = hslQ.s > strictSaturationThreshold;
+        if ((strictCheck && bothSaturated && hueDiff > strictHueThreshold) || (!strictCheck && bothSaturated && hueDiff > 45)) {
+          // big penalty to push this candidate out of threshold
+          combined += 100;
+        }
+        return { ...entry, distance: combined, rawDistanceP: dp, rawDistanceA: da, rawColorDist: Math.round(colorDist), rawHueDiff: Math.round(hueDiff), rawSaturationQ: Math.round(hslQ.s), rawSaturationE: Math.round(hslE.s) };
+      } catch (e) {
+        return { ...entry, distance: combined, rawDistanceP: dp, rawDistanceA: da, rawColorDist: Math.round(colorDist) };
+      }
     });
 
-    // Filter by threshold
-    const filtered = scored.filter((s) => s.distance <= threshold);
+    // Filter by threshold + extra sanity gates to reduce false positives on non-clothing images
+    // Rules:
+    //  - distance <= threshold
+    //  AND at least one of:
+    //    * pHash very similar (dp <= PHASH_STRICT)
+    //    * aHash very similar (da <= AHASH_STRICT)
+    //    * query is saturated (likely colored garment) AND color distance small
+    const PHASH_STRICT = 20;
+    const AHASH_STRICT = 20;
+    const COLOR_DIST_ACCEPT = 110; // perceptual HSL-based distance threshold
+    const QUERY_SAT_MIN = 30; // require query to be reasonably saturated to trust color
+
+    const filtered = scored.filter((s) => {
+      if (s.distance > threshold) return false;
+      const passHash = (typeof s.rawDistanceP === 'number' && s.rawDistanceP <= PHASH_STRICT) || (typeof s.rawDistanceA === 'number' && s.rawDistanceA <= AHASH_STRICT);
+      const passColor = queryHsl.s > QUERY_SAT_MIN && typeof s.rawColorDist === 'number' && s.rawColorDist <= COLOR_DIST_ACCEPT;
+      return passHash || passColor;
+    });
 
     // Deduplicate by product key (prefer productId; fallback to filename base)
     const byProduct = new Map<string, { filename: string; phash: string; productId: string | null; distance: number }>();
