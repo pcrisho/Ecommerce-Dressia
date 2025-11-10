@@ -9,6 +9,8 @@ import { Header } from '@/components/header';
 import { ProductCard } from '@/components/product-card';
 import { Loader } from '@/components/ui/loader';
 import { vestidos as allDresses } from '@/lib/data';
+// Local training embeddings index (fallback metadata lookup)
+import trainingEmbeddings from '../../data/training_embeddings.json';
 import { simulateImageSearch } from '@/ai/flows/image-search-simulation';
 import type { Dress } from '@/lib/types';
 import { cn, formatPrice } from '@/lib/utils';
@@ -18,7 +20,7 @@ export default function Home() {
   const [imagePreview, setImagePreview] = useState<string | null>(null);
   const [isLoadingImage, setIsLoadingImage] = useState(false);
   const [imageSearchResults, setImageSearchResults] = useState<Dress[]>([]);
-  const [imageSearchUnmatched, setImageSearchUnmatched] = useState<Array<{ filename: string; score: number }>>([]);
+  const [imageSearchUnmatched, setImageSearchUnmatched] = useState<Array<{ filename: string; score: number; imageUrl?: string }>>([]);
   const [aiMessage, setAiMessage] = useState<string | null>(null);
   // Default to using Vertex for embeddings unless the user unchecks the box
   const [preferVertex, setPreferVertex] = useState(true);
@@ -71,22 +73,82 @@ export default function Home() {
       const results = data.results || [];
 
       // Map results: try to resolve product objects; keep unmatched as filename+score
-      type Mapped = { product: Dress | null; filename?: string; score?: number };
-      const mapped: Mapped[] = results.map((r: unknown) => {
-        const o = r as { product?: Dress | null; productId?: string; filename?: string; score?: number };
-        const product = o.product || (o.productId ? allDresses.find((d) => d.id === String(o.productId)) : null);
-        return { product, filename: o.filename, score: o.score } as Mapped;
+      type Mapped = { product: Dress | null; filename?: string; score?: number; imageUrl?: string };
+      const mapped: Mapped[] = results.map((r: any) => {
+        // Backend may return: { id, product, productId, distance, score, similarity, metadata }
+        const raw = r as any;
+        const o = raw as { id?: string; productId?: string; filename?: string; score?: number; similarity?: number; distance?: number; metadata?: any };
+
+  // Some backends may include a full `product` object; prefer that if present
+  let product = raw.product ?? (o.productId ? allDresses.find((d) => d.id === String(o.productId)) : null);
+
+        // Resolve filename / imageUrl: prefer explicit filename or metadata, else search local trainingEmbeddings
+        let filename = o.filename || '';
+        let imageUrl: string | undefined = undefined;
+        if (!filename && o.metadata) {
+          // Try common metadata shapes
+          if (typeof o.metadata === 'object') {
+            filename = o.metadata.filename || o.metadata.file || o.metadata.path || '';
+            if (!imageUrl && o.metadata.gs_uri) imageUrl = String(o.metadata.gs_uri).replace('gs://', 'https://storage.googleapis.com/');
+          }
+        }
+        if (!filename && o.id) {
+          const found = (trainingEmbeddings as any[]).find((e) => (e.filename || '').includes(String(o.id)));
+          if (found) {
+            filename = found.filename || '';
+            if (filename && String(filename).startsWith('gs://')) imageUrl = String(filename).replace('gs://', 'https://storage.googleapis.com/');
+            // If the training entry includes a productId, resolve it to a Dress so it shows as a ProductCard
+            if (!product && found.productId) {
+              try {
+                const pid = String(found.productId);
+                const resolved = allDresses.find((d) => d.id === pid);
+                if (resolved) {
+                  // assign to product variable in this scope so matched items render as ProductCard
+                  product = resolved;
+                }
+              } catch (err) {
+                // ignore resolution errors — we'll fall back to unmatched
+              }
+            }
+          }
+        }
+        if (!imageUrl && filename && String(filename).startsWith('gs://')) imageUrl = String(filename).replace('gs://', 'https://storage.googleapis.com/');
+
+        // Compute similarity (0..1) from available fields
+        let similarity: number | undefined = undefined;
+        if (typeof o.similarity === 'number') similarity = o.similarity;
+        else if (typeof o.score === 'number') {
+          const v = o.score;
+          similarity = (v >= -1 && v <= 1) ? (v + 1) / 2 : 1 / (1 + Math.abs(v));
+        } else if (typeof o.distance === 'number') {
+          const v = o.distance;
+          similarity = (v >= -1 && v <= 1) ? (v + 1) / 2 : 1 / (1 + Math.abs(v));
+        }
+
+        return { product, filename, score: similarity !== undefined ? similarity * 100 : (o.score ?? 0), imageUrl } as Mapped;
       });
 
-      // Deduplicate products by id to avoid rendering items with duplicate React keys
-      const productsMap = new Map<string, Dress>();
-      mapped.forEach((m: Mapped) => {
-        if (m.product) {
-          productsMap.set((m.product as Dress).id, m.product as Dress);
+      // Collect matched products with scores, sort by similarity, dedupe, and limit to 4
+      const matchedMapped = mapped.filter((m: Mapped) => m.product) as Array<Mapped>;
+      // Sort matches that have scores first (descending). Items without numeric score fall to the end.
+      matchedMapped.sort((a, b) => (typeof b.score === 'number' ? b.score : 0) - (typeof a.score === 'number' ? a.score : 0));
+      const seenIds = new Set<string>();
+      const topProducts: Dress[] = [];
+      for (const m of matchedMapped) {
+        const p = m.product as Dress;
+        if (!p) continue;
+        if (!seenIds.has(p.id)) {
+          seenIds.add(p.id);
+          topProducts.push(p);
+          if (topProducts.length >= 4) break;
         }
-      });
-      const products: Dress[] = Array.from(productsMap.values());
-      const unmatched = mapped.filter((m: Mapped) => !m.product).map((m: Mapped) => ({ filename: m.filename || '', score: m.score || 0 }));
+      }
+      // If there were fewer than 4 matches with scores, we already included matches without numeric scores in the same pass.
+      const products: Dress[] = topProducts;
+
+      const unmatched = mapped.filter((m: Mapped) => !m.product).map((m: Mapped) => ({ filename: m.filename || '', score: m.score || 0, imageUrl: m.imageUrl }));
+      // Order unmatched by similarity descending
+      unmatched.sort((a, b) => (b.score || 0) - (a.score || 0));
 
       // Show source if present
       if (data.source) {
@@ -95,7 +157,8 @@ export default function Home() {
 
       if (products.length > 0 || unmatched.length > 0) {
         setAiMessage((prev) => (data.source ? `Fuente de embeddings: ${data.source}` : prev));
-        setImageSearchResults(products);
+        // Show the most similar product first
+        setImageSearchResults(products.slice().reverse());
         setImageSearchUnmatched(unmatched);
       } else {
         setAiMessage('No se encontraron coincidencias');
@@ -209,11 +272,20 @@ export default function Home() {
                   {imageSearchResults.map((dress) => (
                     <ProductCard key={dress.id} dress={dress} onViewDetails={(d) => setSelectedDress(d)} />
                   ))}
-                  {imageSearchUnmatched.map((u, idx) => (
-                    <div key={`unmatched-${idx}`} className="border rounded-lg p-4 bg-white dark:bg-gray-900">
-                      <div className="text-sm text-muted-foreground">Archivo</div>
-                      <div className="font-medium mt-1 wrap-break-word">{u.filename}</div>
-                      <div className="text-sm text-muted-foreground mt-2">Score: {typeof u.score === 'number' ? u.score.toFixed(3) : String(u.score)}</div>
+                  {imageSearchUnmatched.map((u: any, idx) => (
+                    <div key={`unmatched-${idx}`} className="border rounded-lg p-4 bg-white dark:bg-gray-900 flex gap-4 items-center">
+                      <div className="w-28 h-20 relative shrink-0 bg-muted rounded overflow-hidden">
+                        {u.imageUrl ? (
+                          <Image src={u.imageUrl} alt={u.filename || 'Resultado'} fill className="object-cover" />
+                        ) : (
+                          <div className="flex items-center justify-center h-full w-full text-sm text-muted-foreground">Sin imagen</div>
+                        )}
+                      </div>
+                      <div className="flex-1">
+                        <div className="text-sm text-muted-foreground">Archivo</div>
+                        <div className="font-medium mt-1 wrap-break-word">{u.filename || u.imageUrl || ''}</div>
+                        <div className="text-sm text-muted-foreground mt-2">Similitud: {typeof u.score === 'number' ? `${Math.round(u.score)}%` : String(u.score)}</div>
+                      </div>
                     </div>
                   ))}
                 </>
