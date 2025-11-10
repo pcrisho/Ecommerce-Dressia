@@ -1,0 +1,44 @@
+# ETAPA 1: Construcción (Builder Stage)
+FROM node:20-slim AS builder
+
+WORKDIR /app
+# Copia archivos de configuración
+COPY package.json package-lock.json ./
+
+# Instala dependencias y hace el build de Next.js
+RUN npm install --legacy-peer-deps
+COPY . .
+RUN npm run build
+
+# ETAPA 2: Producción (Runner Stage)
+FROM node:20-slim AS runner
+
+WORKDIR /app
+
+# Copia solo los archivos esenciales de la etapa de construcción
+COPY --from=builder /app/public ./public
+COPY --from=builder /app/.next ./.next
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/package.json ./package.json
+# Copy next.config.* (supports next.config.ts or next.config.js). If your project uses
+# a TypeScript config file (next.config.ts) this will copy it into the runtime image.
+COPY --from=builder /app/next.config.* ./
+
+# Declare build-time args so passing --build-arg doesn't trigger UndefinedVar warnings.
+ARG GCP_PROJECT_ID
+ARG VERTEX_MODEL_NAME
+ARG IMAGE_MATCH_SIMILARITY_THRESHOLD
+ARG IMAGE_MATCH_FALLBACK_SIMILARITY_THRESHOLD
+
+# Exponer el puerto por defecto de Next.js
+EXPOSE 3000
+
+# Define la variable de entorno para la configuración de la Cuenta de Servicio
+# Cloud Run usará esta variable para inyectar automáticamente el ID del proyecto
+ENV GCP_PROJECT_ID=${GCP_PROJECT_ID}
+ENV VERTEX_MODEL_NAME=${VERTEX_MODEL_NAME}
+ENV IMAGE_MATCH_SIMILARITY_THRESHOLD=${IMAGE_MATCH_SIMILARITY_THRESHOLD}
+ENV IMAGE_MATCH_FALLBACK_SIMILARITY_THRESHOLD=${IMAGE_MATCH_FALLBACK_SIMILARITY_THRESHOLD}
+
+# Comando para iniciar la aplicación en modo producción
+CMD ["npm", "start"]

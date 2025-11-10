@@ -1,45 +1,15 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
-import fs from 'fs';
-import path from 'path';
+// No local FS/index search here any more - we call the Vector Search Cloud Function.
 
 export const runtime = 'nodejs';
 
-import { GoogleAuth, ExternalAccountClient, type GoogleAuth as GoogleAuthType } from 'google-auth-library';
+import type { GoogleAuth as GoogleAuthType } from 'google-auth-library';
 
 // Prefer explicit project id from env (set this in Vercel):
 const GCP_PROJECT_ID = process.env.GCP_PROJECT_ID || process.env.GOOGLE_CLOUD_PROJECT || '';
 
-function cosine(a: number[], b: number[]) {
-  // Defensive: require equal-length vectors. If lengths differ, return 0 similarity
-  // to avoid comparing only prefixes (which produced inconsistent scores).
-  if (!Array.isArray(a) || !Array.isArray(b)) return 0;
-  if (a.length !== b.length) return 0;
-  let dot = 0, na = 0, nb = 0;
-  for (let i = 0; i < a.length; i++) {
-    dot += a[i] * b[i];
-    na += a[i] * a[i];
-    nb += b[i] * b[i];
-  }
-  if (na === 0 || nb === 0) return 0;
-  return dot / (Math.sqrt(na) * Math.sqrt(nb));
-}
-
-function l2normalize(vec: number[]) {
-  if (!Array.isArray(vec) || vec.length === 0) return vec;
-  let sum = 0;
-  for (let i = 0; i < vec.length; i++) {
-    const v = Number(vec[i]) || 0;
-    sum += v * v;
-  }
-  const norm = Math.sqrt(sum) || 1;
-  return vec.map((x) => (Number(x) || 0) / norm);
-}
-
-// Camel-cased alias used elsewhere in the codebase/tests: ensure l2Normalize exists
-function l2Normalize(vec: number[]) {
-  return l2normalize(vec);
-}
+// Note: we no longer perform local similarity search in this route.
 
 async function computeEmbeddingWithVertex(buffer: Buffer) {
   // This function will call Vertex using Google Auth. It supports three modes:
@@ -50,46 +20,34 @@ async function computeEmbeddingWithVertex(buffer: Buffer) {
   const location = process.env.VERTEX_LOCATION || 'us-central1';
   if (!model) throw new Error('VERTEX_MODEL_NAME not configured');
 
-  // Use google-auth-library to obtain an access token. Prefer an explicit ExternalAccountClient
-  // (WIF) when GOOGLE_WORKLOAD_IDENTITY_PROVIDER and GOOGLE_SERVICE_ACCOUNT_EMAIL are present,
-  // otherwise fall back to Application Default Credentials (ADC).
-  let auth: GoogleAuthType | undefined;
-  let usedExplicitWif = false;
-  let externalClient: any = null;
+  // Use google-auth-library to obtain an access token. If GCP_SERVICE_ACCOUNT_KEY is provided
+  // (workaround: WIF JSON stored in this env var), parse and use it; otherwise fall back to ADC.
+  let auth: GoogleAuthType;
 
-  // PRIORIDAD 1: Forzar el uso de ExternalAccountClient (WIF) si las variables estándar están presentes
-  if (process.env.GOOGLE_WORKLOAD_IDENTITY_PROVIDER && process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL) {
+  // Dynamically import GoogleAuth class (keeps serverless bundles small)
+  const { GoogleAuth } = await import('google-auth-library');
+
+  // PRIORIDAD 1: Cargar credenciales WIF explícitas desde GCP_SERVICE_ACCOUNT_KEY (el workaround)
+  if (process.env.GCP_SERVICE_ACCOUNT_KEY) {
     try {
-      externalClient = new (ExternalAccountClient as any)({
-        // The provider/audience is provided via GOOGLE_WORKLOAD_IDENTITY_PROVIDER
-        targetAudience: process.env.GOOGLE_WORKLOAD_IDENTITY_PROVIDER,
-        serviceAccountEmail: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
-        // scopes needed to access GCP APIs
-        scopes: ['https://www.googleapis.com/auth/cloud-platform'],
-      });
-      usedExplicitWif = true;
+      const creds = JSON.parse(process.env.GCP_SERVICE_ACCOUNT_KEY);
+      auth = new GoogleAuth({ credentials: creds, scopes: ['https://www.googleapis.com/auth/cloud-platform'] });
     } catch (e) {
-      console.warn('Explicit ExternalAccountClient (WIF) failed, falling back to ADC:', String(e));
+      console.warn('GCP_SERVICE_ACCOUNT_KEY is present but could not be parsed as JSON; falling back to ADC:', String(e));
+      auth = new GoogleAuth({ scopes: ['https://www.googleapis.com/auth/cloud-platform'] });
     }
-  }
-
-  // PRIORIDAD 2: Fallback a ADC si WIF falló
-  if (!usedExplicitWif) {
+  } 
+  // PRIORIDAD 2: Fallback a Detección Automática de Credenciales (ADC)
+  else {
     auth = new GoogleAuth({ scopes: ['https://www.googleapis.com/auth/cloud-platform'] });
   }
-  console.debug('computeEmbeddingWithVertex: project=', GCP_PROJECT_ID || '(not set)', 'model=', model, 'usedExplicitWif=', usedExplicitWif);
+  console.debug('computeEmbeddingWithVertex: project=', GCP_PROJECT_ID || '(not set)', 'model=', model);
 
 
   
 
-  let client: any;
-  if (externalClient) {
-    client = externalClient;
-  } else if (auth) {
-    client = await auth.getClient();
-  } else {
-    throw new Error('No authentication client available to call Vertex');
-  }
+  // Ensure we have an auth client instance and request an access token
+  const client = await auth.getClient();
   const tokenRes = await client.getAccessToken();
   const token = tokenRes?.token;
 
@@ -127,6 +85,31 @@ async function computeEmbeddingWithVertex(buffer: Buffer) {
   throw new Error('Unexpected Vertex response shape');
 }
 
+async function findNeighborsWithCF(queryEmbedding: number[]) {
+  const cfUrl = process.env.VECTOR_SEARCH_CF_URL;
+  const cfAudience = process.env.VECTOR_SEARCH_CF_AUDIENCE;
+  if (!cfUrl) throw new Error('VECTOR_SEARCH_CF_URL not configured');
+  const audience = cfAudience || cfUrl;
+
+  // Use google-auth-library to obtain an ID token for the Cloud Function audience
+  const { GoogleAuth } = await import('google-auth-library');
+  const auth = new GoogleAuth();
+  // getIdTokenClient returns a client that will provide ID tokens suitable for authenticating to the targetAudience
+  const idClient = await auth.getIdTokenClient(audience);
+  const headers = await idClient.getRequestHeaders();
+
+  const res = await fetch(cfUrl, {
+    method: 'POST',
+    headers: { ...headers, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ feature_vector: queryEmbedding })
+  });
+  if (!res.ok) {
+    const t = await res.text().catch(() => '<no body>');
+    throw new Error('Vector search CF failed: ' + res.status + ' ' + t);
+  }
+  return await res.json();
+}
+
 export async function POST(req: NextRequest) {
   try {
     // Accept multipart/form-data (file) or JSON with dataUri
@@ -151,10 +134,7 @@ export async function POST(req: NextRequest) {
       fileBuffer = Buffer.from(match[2], 'base64');
     }
 
-    const embeddingsPath = path.join(process.cwd(), 'data', 'training_embeddings.json');
-    const hasLocalIndex = fs.existsSync(embeddingsPath);
-
-    let queryEmbedding: number[] | null = null;
+  let queryEmbedding: number[] | null = null;
     // Determine preference (query param or form field)
     let prefer: string | null = req.nextUrl?.searchParams?.get('prefer') || null;
     if (multipartForm) {
@@ -173,7 +153,6 @@ export async function POST(req: NextRequest) {
         vertexAttempted = true;
         try {
           queryEmbedding = await computeEmbeddingWithVertex(fileBuffer!);
-          if (Array.isArray(queryEmbedding)) queryEmbedding = l2Normalize(queryEmbedding as number[]);
           usedVertex = true;
         } catch (err) {
           vertexError = String(err);
@@ -186,8 +165,7 @@ export async function POST(req: NextRequest) {
       if (process.env.VERTEX_MODEL_NAME) {
         vertexAttempted = true;
         try {
-          queryEmbedding = await computeEmbeddingWithVertex(fileBuffer!);
-      if (Array.isArray(queryEmbedding)) queryEmbedding = l2Normalize(queryEmbedding as number[]);
+      queryEmbedding = await computeEmbeddingWithVertex(fileBuffer!);
           usedVertex = true;
         } catch (err) {
           vertexError = String(err);
@@ -196,75 +174,37 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    if (!queryEmbedding && !hasLocalIndex) {
-      return NextResponse.json({ error: 'No embeddings index found and Vertex not configured or failed' }, { status: 500 });
-    }
-
-  const indexRaw = hasLocalIndex ? fs.readFileSync(embeddingsPath, 'utf8') : '[]';
-  type IndexEntry = { filename: string; productId?: string; embedding: number[]; score?: number };
-  // Parse index and defensively normalize embedding shapes so scoring always sees a flat number[]
-  const rawIndex = JSON.parse(indexRaw) as Array<Record<string, any>>;
-
-  function flattenEmbedding(e: any): number[] | null {
-    if (!e) return null;
-    if (Array.isArray(e)) return e.map((v) => Number(v));
-    if (typeof e === 'object') {
-  if (Array.isArray(e.imageEmbedding)) return e.imageEmbedding.map((v: any) => Number(v));
-  if (Array.isArray(e.embedding)) return e.embedding.map((v: any) => Number(v));
-  if (Array.isArray(e.vector)) return e.vector.map((v: any) => Number(v));
-      // return the first array-valued property we find
-      for (const k of Object.keys(e)) {
-        if (Array.isArray(e[k])) return e[k].map((v) => Number(v));
-      }
-    }
-    return null;
-  }
-
-  const index = rawIndex.map((r) => {
-    const emb = flattenEmbedding(r.embedding || r);
-    const normalized = Array.isArray(emb) && emb.length ? l2Normalize(emb) : [];
-    return { filename: String(r.filename || r.file || ''), productId: r.productId ? String(r.productId) : undefined, embedding: normalized } as IndexEntry;
-  });
-
     if (!queryEmbedding) {
-      // If we don't have Vertex, try to compute a simple fallback from bytes (not ideal)
-      // We'll compute a tiny vector based on byte averages so it can be compared to fallback embeddings.
-      const buf = fileBuffer!;
-      const v = [];
-      let r = 0, g = 0, b = 0, c = 0;
-      for (let i = 0; i < buf.length; i += Math.max(1, Math.floor(buf.length / 1024))) {
-        r = (r + buf[i]) % 256;
-        g = (g + (buf[i + 1] || 0)) % 256;
-        b = (b + (buf[i + 2] || 0)) % 256;
-        c++;
-      }
-      v.push(Math.round(r / c)); v.push(Math.round(g / c)); v.push(Math.round(b / c));
-  queryEmbedding = v;
-  if (Array.isArray(queryEmbedding)) queryEmbedding = l2normalize(queryEmbedding as number[]);
+      return NextResponse.json({ error: 'Vertex embedding not produced and no fallback available', vertexAttempted, vertexError }, { status: 500 });
     }
 
-  // Brute-force cosine search
-  const scored = index.map((e) => ({ ...e, score: cosine(queryEmbedding as number[], e.embedding) }));
-  const sorted = scored.sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+    // Ensure numeric array and L2-normalize before sending to the Cloud Function
+    const numeric = (queryEmbedding as any[]).map((v) => Number(v) || 0);
+    const sumsq = numeric.reduce((s, x) => s + x * x, 0);
+    const norm = Math.sqrt(sumsq) || 1;
+    const normalized = numeric.map((x) => x / norm);
 
-  // Apply a minimum similarity threshold. Use a stricter threshold when Vertex produced the query
-  // embedding, but allow a lower threshold for fallback heuristics so the API doesn't always return empty.
-  const STRICT_THRESHOLD = Number(process.env.IMAGE_MATCH_SIMILARITY_THRESHOLD || '0.6');
-  const FALLBACK_THRESHOLD = Number(process.env.IMAGE_MATCH_FALLBACK_SIMILARITY_THRESHOLD || '0.25');
-  const effectiveThreshold = usedVertex ? STRICT_THRESHOLD : FALLBACK_THRESHOLD;
-  const top = sorted.filter((s) => (s.score ?? 0) >= effectiveThreshold).slice(0, 10);
+    // Debug: log vector length + head so we can validate what the CF receives
+    try {
+      const head = normalized.slice(0, 8);
+      console.debug('visual-match-vertex: sending feature_vector length=', normalized.length, 'head=', head.map((n) => Number(n).toFixed(6)).join(','));
+    } catch (e) {
+      // no-op
+    }
 
-    // Map to products in local catalog if possible
-    const dataFile = path.join(process.cwd(), 'src', 'lib', 'data.ts');
-    // We won't import TS file here; we'll map productId to product by reading the existing JSON in data if present.
+    // Call Cloud Function to perform the search using an authenticated ID token
+    let cfJson: any;
+    try {
+      cfJson = await findNeighborsWithCF(normalized);
+    } catch (err) {
+      console.error('Error calling vector search Cloud Function:', err);
+      return NextResponse.json({ error: 'Vector search Cloud Function call failed', detail: String(err), vertexAttempted, vertexError }, { status: 502 });
+    }
 
-  const results = top.map((t) => ({ filename: t.filename, productId: t.productId, score: t.score }));
-  const source = usedVertex ? 'vertex' : 'fallback';
-  const topScore = sorted.length ? (sorted[0].score ?? 0) : 0;
-  const resp: { results: { filename: string; productId?: string; score?: number }[]; source: string; vertexAttempted: boolean; usedVertex: boolean; topScore: number; vertexError?: string } = { results, source, vertexAttempted, usedVertex, topScore };
-  if (vertexError) resp.vertexError = vertexError;
-
-  return NextResponse.json(resp);
+    // Merge diagnostics and return the Cloud Function response
+    const resp = { ...cfJson, vertexAttempted, usedVertex } as any;
+    if (vertexError) resp.vertexError = vertexError;
+    return NextResponse.json(resp);
   } catch (err) {
     console.error('visual-match-vertex error', err);
     return NextResponse.json({ error: 'Internal server error', detail: String(err) }, { status: 500 });
