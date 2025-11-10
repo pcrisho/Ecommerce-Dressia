@@ -76,23 +76,25 @@ export default function Home() {
       const results = data.results || [];
 
       // Map results: try to resolve product objects; keep unmatched as filename+score
-  type Mapped = { product: Dress | null; filename?: string; score?: number; imageUrl?: string; rawScore?: number; rank?: number };
+  type Mapped = { product: Dress | null; filename?: string; score?: number; imageUrl?: string; rawScore?: number; rank?: number; color?: string | null; color_confidence?: number | null; color_uncertain?: boolean; low_similarity?: boolean };
       const mapped: Mapped[] = results.map((r: any) => {
-        // Backend may return: { id, product, productId, distance, score, similarity, metadata }
+        // Backend may return new shape: { id, similarity_score, score, distance, color, color_confidence, color_uncertain, metadata, image_url }
         const raw = r as any;
-        const o = raw as { id?: string; productId?: string; filename?: string; score?: number; similarity?: number; distance?: number; metadata?: any };
+        const o = raw as { id?: string; productId?: string; filename?: string; score?: number; similarity?: number; similarity_score?: number; distance?: number; metadata?: any; image_url?: string; color?: any; color_confidence?: number; color_uncertain?: boolean; low_similarity?: boolean };
 
   // Some backends may include a full `product` object; prefer that if present
   let product = raw.product ?? (o.productId ? allDresses.find((d) => d.id === String(o.productId)) : null);
 
-        // Resolve filename / imageUrl: prefer explicit filename or metadata, else search local trainingEmbeddings
+        // Resolve filename / imageUrl: prefer explicit image_url or filename or metadata, else search local trainingEmbeddings
         let filename = o.filename || '';
         let imageUrl: string | undefined = undefined;
+        if (o.image_url) imageUrl = o.image_url;
         if (!filename && o.metadata) {
           // Try common metadata shapes
           if (typeof o.metadata === 'object') {
             filename = o.metadata.filename || o.metadata.file || o.metadata.path || '';
-            if (!imageUrl && o.metadata.gs_uri) imageUrl = String(o.metadata.gs_uri).replace('gs://', 'https://storage.googleapis.com/');
+            if (!imageUrl && o.metadata.gcs_uri) imageUrl = String(o.metadata.gcs_uri).replace('gs://', 'https://storage.googleapis.com/');
+            if (!imageUrl && o.metadata.url) imageUrl = o.metadata.url;
           }
         }
         if (!filename && o.id) {
@@ -106,8 +108,13 @@ export default function Home() {
                 const pid = String(found.productId);
                 const resolved = allDresses.find((d) => d.id === pid);
                 if (resolved) {
-                  // assign to product variable in this scope so matched items render as ProductCard
-                  product = resolved;
+                  // assign a shallow copy so we can override the image url for the matched result
+                  // without mutating the global product catalog
+                  const copy: Dress = {
+                    ...resolved,
+                    image: { ...resolved.image, imageUrl: imageUrl || resolved.image.imageUrl }
+                  };
+                  product = copy;
                 }
               } catch (err) {
                 // ignore resolution errors — we'll fall back to unmatched
@@ -117,40 +124,63 @@ export default function Home() {
         }
         if (!imageUrl && filename && String(filename).startsWith('gs://')) imageUrl = String(filename).replace('gs://', 'https://storage.googleapis.com/');
 
-        // Compute similarity (0..1) from available fields and a ranking value where LOWER means MORE similar.
+        // Prefer explicit similarity_score (0..1). Fallback to old fields.
         let similarity: number | undefined = undefined;
         let rawScore: number | undefined = undefined;
-        if (typeof o.similarity === 'number') {
+        if (typeof o.similarity_score === 'number') {
+          similarity = o.similarity_score;
+          rawScore = o.similarity_score;
+        } else if (typeof o.similarity === 'number') {
           similarity = o.similarity;
           rawScore = o.similarity;
         } else if (typeof o.score === 'number') {
           const v = o.score;
           rawScore = v;
-          // Heuristic: if score is in [-1,1] treat as cosine-like (higher better), else treat as distance-like (lower better)
           if (v >= -1 && v <= 1) similarity = (v + 1) / 2;
           else similarity = 1 / (1 + Math.abs(v));
         } else if (typeof o.distance === 'number') {
           const v = o.distance;
           rawScore = v;
-          // distance-like: convert to similarity for display but keep raw distance for ranking (lower better)
           similarity = (v >= -1 && v <= 1) ? (v + 1) / 2 : 1 / (1 + Math.abs(v));
         }
 
-        // Determine rank: lower rank -> more similar. For distance-like metrics use rawScore (lower better).
-        // For similarity metrics (0..1) use negative similarity so higher similarity sorts first when sorting ascending.
+        // Color fields (backward-compatible)
+        let dominant_color: string | null = null;
+        let color_confidence: number | null = null;
+        let color_uncertain = false;
+        if (o.color) {
+          if (typeof o.color === 'string') dominant_color = o.color;
+          else if (typeof o.color === 'object') dominant_color = o.color.dominant_color || o.color.name || null;
+        }
+        if (typeof o.color_confidence === 'number') color_confidence = o.color_confidence;
+        if (typeof o.color_uncertain === 'boolean') color_uncertain = o.color_uncertain;
+        // If service returns color_info object, prefer that
+        if (o.metadata && o.metadata.color_info) {
+          const ci = o.metadata.color_info;
+          dominant_color = dominant_color || ci.dominant_color || ci.color || null;
+          if (typeof ci.color_confidence === 'number') color_confidence = ci.color_confidence;
+        }
+        // If confidence is low, mark as uncertain
+        if (color_confidence !== null && color_confidence < 0.5) {
+          color_uncertain = true;
+        }
+
+        // low similarity flag
+        const low_similarity = typeof similarity === 'number' && similarity < 0.5 || !!o.low_similarity;
+
+        // Determine rank for sorting
         let rank: number | undefined = undefined;
         if (typeof rawScore === 'number') {
-          // if rawScore outside [-1,1], it's distance-like (lower better)
           if (rawScore < -1 || rawScore > 1) {
             rank = rawScore;
           } else if (typeof similarity === 'number') {
-            rank = -similarity; // higher similarity -> lower rank
+            rank = -similarity;
           }
         } else if (typeof similarity === 'number') {
           rank = -similarity;
         }
 
-        return { product, filename, score: similarity !== undefined ? similarity * 100 : (o.score ?? 0), imageUrl, rawScore, rank } as Mapped;
+        return { product, filename, score: similarity !== undefined ? similarity * 100 : (o.score ?? 0), imageUrl, rawScore, rank, color: dominant_color, color_confidence, color_uncertain, low_similarity } as Mapped;
       });
 
       // Collect matched products with scores, sort by similarity (desc), dedupe and split into top3 + rest
@@ -170,9 +200,9 @@ export default function Home() {
       const top3 = deduped.slice(0, 3);
       const others = deduped.slice(3);
 
-      const unmatched = mapped.filter((m: Mapped) => !m.product).map((m: Mapped) => ({ filename: m.filename || '', score: m.score || 0, imageUrl: m.imageUrl }));
-      // Order unmatched by similarity descending
-      unmatched.sort((a, b) => (b.score || 0) - (a.score || 0));
+  const unmatched = mapped.filter((m: Mapped) => !m.product).map((m: Mapped) => ({ filename: m.filename || '', score: m.score || 0, imageUrl: m.imageUrl, color: m.color, color_confidence: m.color_confidence, color_uncertain: m.color_uncertain, low_similarity: m.low_similarity }));
+  // Order unmatched by similarity descending
+  unmatched.sort((a, b) => (b.score || 0) - (a.score || 0));
 
       // Show source if present
       if (data.source) {
@@ -321,7 +351,18 @@ export default function Home() {
                       <div className="flex-1">
                         <div className="text-sm text-muted-foreground">Archivo</div>
                         <div className="font-medium mt-1 wrap-break-word">{u.filename || u.imageUrl || ''}</div>
-                        <div className="text-sm text-muted-foreground mt-2">Similitud: {typeof u.score === 'number' ? `${Math.round(u.score)}%` : String(u.score)}</div>
+                        <div className="mt-2 flex items-center gap-3">
+                          <div className="text-sm text-muted-foreground">Similitud: {typeof u.score === 'number' ? `${Math.round(u.score)}%` : String(u.score)}</div>
+                          {u.low_similarity && (
+                            <div className="text-xs px-2 py-1 rounded bg-yellow-100 text-yellow-800">Baja similitud</div>
+                          )}
+                          {u.color && (
+                            <div className="text-xs px-2 py-1 rounded bg-blue-50 text-blue-800">{u.color_confidence && !u.color_uncertain ? `${u.color} (${Math.round(u.color_confidence * 100)}%)` : u.color}</div>
+                          )}
+                          {u.color_uncertain && !u.color && (
+                            <div className="text-xs px-2 py-1 rounded bg-gray-100 text-gray-800">Color incierto</div>
+                          )}
+                        </div>
                       </div>
                     </div>
                   ))}

@@ -201,9 +201,114 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Vector search Cloud Function call failed', detail: String(err), vertexAttempted, vertexError }, { status: 502 });
     }
 
-    // Merge diagnostics and return the Cloud Function response
-    const resp = { ...cfJson, vertexAttempted, usedVertex } as any;
+    // The Cloud Function previously returned raw `results`/`matches` with distance values.
+    // New CF `main.py` now returns items with shape { id, distance, score, color_info, metadata }
+    // Normalize and expose a clean, backward-compatible JSON shape for the frontend.
+
+    // Try to locate the array of items using common keys
+    const rawResults = cfJson?.results || cfJson?.matches || cfJson?.items || [];
+
+    // Helper: convert gs://bucket/path -> https://storage.googleapis.com/bucket/path
+    const gsToHttps = (gs: string | undefined | null) => {
+      if (!gs) return null;
+      const m = String(gs).match(/^gs:\/\/(.+?)\/(.+)$/);
+      if (!m) return null;
+      const bucket = m[1];
+      const path = m[2];
+      return `https://storage.googleapis.com/${bucket}/${path}`;
+    };
+
+    // Accumulate simple in-memory color counts for quick diagnostics (process-lifetime)
+    // This is lightweight and useful in development; for prod consider exporting metrics to Cloud Monitoring.
+    const colorCounts: Record<string, number> = {};
+
+    const cleaned = Array.isArray(rawResults)
+      ? rawResults.map((r: any) => {
+          const id = r?.id || r?.itemId || null;
+          const metadata = r?.metadata || {};
+          const filename = metadata?.filename || null;
+          // Prefer explicit 'score' field. If missing, fall back from 'distance' -> similarity conversion.
+          let similarity_score: number | null = null;
+          if (typeof r?.score === 'number') {
+            similarity_score = r.score;
+          } else if (typeof r?.similarity === 'number') {
+            similarity_score = r.similarity;
+          } else if (typeof r?.distance === 'number') {
+            // Fallback: convert distance -> similarity in a reasonable way
+            // Use 1 / (1 + abs(distance)) so that lower distance -> higher similarity (range (0,1])
+            try {
+              const d = Math.abs(Number(r.distance) || 0);
+              similarity_score = 1 / (1 + d);
+            } catch (e) {
+              similarity_score = null;
+            }
+          }
+
+          // Color info handling: backwards-compatible if color_info missing
+          const colorInfo = r?.color_info || r?.color || null;
+          let dominant_color: string | null = null;
+          let color_confidence: number | null = null;
+          if (colorInfo) {
+            // color_info may be an object { dominant_color, color_confidence }
+            if (typeof colorInfo === 'object') {
+              dominant_color = colorInfo?.dominant_color || colorInfo?.color || null;
+              color_confidence = typeof colorInfo?.color_confidence === 'number' ? colorInfo.color_confidence : (typeof colorInfo?.confidence === 'number' ? colorInfo.confidence : null);
+            } else if (typeof colorInfo === 'string') {
+              dominant_color = colorInfo;
+            }
+          }
+
+          // If confidence is low, mark color as 'color incierto' per spec
+          let color_field = dominant_color;
+          let color_uncertain = false;
+          if (color_confidence !== null && color_confidence < 0.5) {
+            color_field = 'color incierto';
+            color_uncertain = true;
+          }
+
+          // Low similarity flag
+          const low_similarity = typeof similarity_score === 'number' && similarity_score < 0.5;
+
+          // Build image_url from metadata.gcs_uri if available, else try metadata.url
+          const image_url = metadata?.gcs_uri ? gsToHttps(metadata.gcs_uri) : (metadata?.url || metadata?.image_url || null);
+
+          // Update colorCounts
+          try {
+            const k = (dominant_color || 'unknown').toLowerCase();
+            colorCounts[k] = (colorCounts[k] || 0) + 1;
+          } catch (e) {
+            // ignore
+          }
+
+          return {
+            id,
+            filename,
+            image_url,
+            color: color_field,
+            color_confidence,
+            color_uncertain,
+            similarity_score,
+            low_similarity,
+            // keep raw fields for debugging if needed
+            _raw: r
+          } as any;
+        })
+      : [];
+
+    // Log a compact summary of detected colors for diagnostics (development only)
+    try {
+      const entries = Object.entries(colorCounts).sort((a, b) => b[1] - a[1]);
+      if (entries.length) {
+        console.debug('visual-match-vertex: color summary for request:', entries.slice(0, 8));
+      }
+    } catch (e) {
+      // noop
+    }
+
+    const resp = { results: cleaned, vertexAttempted, usedVertex } as any;
     if (vertexError) resp.vertexError = vertexError;
+    // Preserve original CF payload as _cf for debugging if necessary (avoid returning huge data in prod)
+    resp._cf = typeof cfJson === 'object' ? (Array.isArray(cfJson.results) ? undefined : cfJson) : undefined;
     return NextResponse.json(resp);
   } catch (err) {
     console.error('visual-match-vertex error', err);
