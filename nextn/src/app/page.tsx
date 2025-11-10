@@ -20,6 +20,8 @@ export default function Home() {
   const [imagePreview, setImagePreview] = useState<string | null>(null);
   const [isLoadingImage, setIsLoadingImage] = useState(false);
   const [imageSearchResults, setImageSearchResults] = useState<Dress[]>([]);
+  // Other matched products (after the top 3)
+  const [imageSearchOther, setImageSearchOther] = useState<Dress[]>([]);
   const [imageSearchUnmatched, setImageSearchUnmatched] = useState<Array<{ filename: string; score: number; imageUrl?: string }>>([]);
   const [aiMessage, setAiMessage] = useState<string | null>(null);
   // Default to using Vertex for embeddings unless the user unchecks the box
@@ -43,10 +45,11 @@ export default function Home() {
     const file = event.target.files?.[0];
     if (!file) return;
 
-    setIsLoadingImage(true);
-    setSearchTerm('');
-    setAiMessage(null);
-    setImageSearchResults([]);
+  setIsLoadingImage(true);
+  setSearchTerm('');
+  setAiMessage(null);
+  setImageSearchResults([]);
+  setImageSearchOther([]);
 
     try {
       // Show preview first
@@ -73,7 +76,7 @@ export default function Home() {
       const results = data.results || [];
 
       // Map results: try to resolve product objects; keep unmatched as filename+score
-      type Mapped = { product: Dress | null; filename?: string; score?: number; imageUrl?: string };
+  type Mapped = { product: Dress | null; filename?: string; score?: number; imageUrl?: string; rawScore?: number; rank?: number };
       const mapped: Mapped[] = results.map((r: any) => {
         // Backend may return: { id, product, productId, distance, score, similarity, metadata }
         const raw = r as any;
@@ -114,37 +117,58 @@ export default function Home() {
         }
         if (!imageUrl && filename && String(filename).startsWith('gs://')) imageUrl = String(filename).replace('gs://', 'https://storage.googleapis.com/');
 
-        // Compute similarity (0..1) from available fields
+        // Compute similarity (0..1) from available fields and a ranking value where LOWER means MORE similar.
         let similarity: number | undefined = undefined;
-        if (typeof o.similarity === 'number') similarity = o.similarity;
-        else if (typeof o.score === 'number') {
+        let rawScore: number | undefined = undefined;
+        if (typeof o.similarity === 'number') {
+          similarity = o.similarity;
+          rawScore = o.similarity;
+        } else if (typeof o.score === 'number') {
           const v = o.score;
-          similarity = (v >= -1 && v <= 1) ? (v + 1) / 2 : 1 / (1 + Math.abs(v));
+          rawScore = v;
+          // Heuristic: if score is in [-1,1] treat as cosine-like (higher better), else treat as distance-like (lower better)
+          if (v >= -1 && v <= 1) similarity = (v + 1) / 2;
+          else similarity = 1 / (1 + Math.abs(v));
         } else if (typeof o.distance === 'number') {
           const v = o.distance;
+          rawScore = v;
+          // distance-like: convert to similarity for display but keep raw distance for ranking (lower better)
           similarity = (v >= -1 && v <= 1) ? (v + 1) / 2 : 1 / (1 + Math.abs(v));
         }
 
-        return { product, filename, score: similarity !== undefined ? similarity * 100 : (o.score ?? 0), imageUrl } as Mapped;
+        // Determine rank: lower rank -> more similar. For distance-like metrics use rawScore (lower better).
+        // For similarity metrics (0..1) use negative similarity so higher similarity sorts first when sorting ascending.
+        let rank: number | undefined = undefined;
+        if (typeof rawScore === 'number') {
+          // if rawScore outside [-1,1], it's distance-like (lower better)
+          if (rawScore < -1 || rawScore > 1) {
+            rank = rawScore;
+          } else if (typeof similarity === 'number') {
+            rank = -similarity; // higher similarity -> lower rank
+          }
+        } else if (typeof similarity === 'number') {
+          rank = -similarity;
+        }
+
+        return { product, filename, score: similarity !== undefined ? similarity * 100 : (o.score ?? 0), imageUrl, rawScore, rank } as Mapped;
       });
 
-      // Collect matched products with scores, sort by similarity, dedupe, and limit to 4
+      // Collect matched products with scores, sort by similarity (desc), dedupe and split into top3 + rest
       const matchedMapped = mapped.filter((m: Mapped) => m.product) as Array<Mapped>;
-      // Sort matches that have scores first (descending). Items without numeric score fall to the end.
-      matchedMapped.sort((a, b) => (typeof b.score === 'number' ? b.score : 0) - (typeof a.score === 'number' ? a.score : 0));
+  // Sort by rank ascending (lower rank = more similar). Items without rank fall to the end.
+  matchedMapped.sort((a, b) => (typeof a.rank === 'number' ? a.rank : Infinity) - (typeof b.rank === 'number' ? b.rank : Infinity));
       const seenIds = new Set<string>();
-      const topProducts: Dress[] = [];
+      const deduped: Dress[] = [];
       for (const m of matchedMapped) {
         const p = m.product as Dress;
         if (!p) continue;
         if (!seenIds.has(p.id)) {
           seenIds.add(p.id);
-          topProducts.push(p);
-          if (topProducts.length >= 4) break;
+          deduped.push(p);
         }
       }
-      // If there were fewer than 4 matches with scores, we already included matches without numeric scores in the same pass.
-      const products: Dress[] = topProducts;
+      const top3 = deduped.slice(0, 3);
+      const others = deduped.slice(3);
 
       const unmatched = mapped.filter((m: Mapped) => !m.product).map((m: Mapped) => ({ filename: m.filename || '', score: m.score || 0, imageUrl: m.imageUrl }));
       // Order unmatched by similarity descending
@@ -155,10 +179,11 @@ export default function Home() {
         setAiMessage(`Fuente de embeddings: ${data.source}${data.vertexError ? ' (vertex error: ' + data.vertexError + ')' : ''}`);
       }
 
-      if (products.length > 0 || unmatched.length > 0) {
+      if (top3.length > 0 || unmatched.length > 0 || others.length > 0) {
         setAiMessage((prev) => (data.source ? `Fuente de embeddings: ${data.source}` : prev));
-        // Show the most similar product first
-        setImageSearchResults(products.slice().reverse());
+        // Show top 3 most similar products first, then "others" below
+        setImageSearchResults(top3);
+        setImageSearchOther(others);
         setImageSearchUnmatched(unmatched);
       } else {
         setAiMessage('No se encontraron coincidencias');
@@ -169,6 +194,7 @@ export default function Home() {
       console.error('Error en búsqueda por imagen:', error);
       setAiMessage(error instanceof Error ? error.message : 'Error procesando la imagen');
       setImageSearchResults([]);
+      setImageSearchOther([]);
     } finally {
       setIsLoadingImage(false);
       URL.revokeObjectURL(imagePreview as string);
@@ -272,6 +298,17 @@ export default function Home() {
                   {imageSearchResults.map((dress) => (
                     <ProductCard key={dress.id} dress={dress} onViewDetails={(d) => setSelectedDress(d)} />
                   ))}
+                  {/* Otros matches (después de los top 3) */}
+                  {imageSearchOther.length > 0 && (
+                    <div className="col-span-full mt-4">
+                      <h3 className="text-xl font-semibold mb-4">Prendas que te podrían interesar</h3>
+                      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
+                        {imageSearchOther.map((dress) => (
+                          <ProductCard key={`other-${dress.id}`} dress={dress} onViewDetails={(d) => setSelectedDress(d)} />
+                        ))}
+                      </div>
+                    </div>
+                  )}
                   {imageSearchUnmatched.map((u: any, idx) => (
                     <div key={`unmatched-${idx}`} className="border rounded-lg p-4 bg-white dark:bg-gray-900 flex gap-4 items-center">
                       <div className="w-28 h-20 relative shrink-0 bg-muted rounded overflow-hidden">
